@@ -1,0 +1,17 @@
+{
+  "name": "@browserbox/webview-element",
+  "version": "0.1.0",
+  "description": "BrowserBox custom element API",
+  "type": "module",
+  "main": "src/browserbox-webview.js",
+  "exports": {
+    ".": "./src/browserbox-webview.js"
+  },
+  "keywords": [
+    "browserbox",
+    "webview",
+    "custom-element",
+    "rbi"
+  ],
+  "license": "AGPL-3.0-or-later"
+}

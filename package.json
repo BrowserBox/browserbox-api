@@ -1,6 +1,7 @@
 {
   "name": "@browserbox/webview-element",
-  "version": "0.1.0",
+  "version": "2.0.0",
+  "author": "@dosy",
   "description": "BrowserBox custom element API",
   "type": "module",
   "main": "src/browserbox-webview.js",

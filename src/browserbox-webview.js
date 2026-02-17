@@ -23,7 +23,7 @@
  * |-----------|----------|---------|-------------|
  * | `login-link` | yes | — | Full BrowserBox login URL with auth token |
  * | `width` | no | `"100%"` | CSS width (px if bare number) |
- * | `height` | no | `"400px"` | CSS height (px if bare number) |
+ * | `height` | no | `"100%"` | CSS height (px if bare number) |
  * | `parent-origin` | no | `"*"` | Restrict postMessage origin |
  * | `request-timeout-ms` | no | `30000` | API call timeout (ms) |
  *
@@ -41,6 +41,7 @@
  * | `did-stop-loading` | `{ tabId, url }` | Page load finished |
  * | `did-navigate` | `{ tabId, url }` | Navigation committed |
  * | `policy-denied` | `{ url, reason }` | Navigation blocked by policy |
+ * | `disconnected` | — | Session ended (element removed or login-link changed) |
  *
  * ## Transport
  * The component auto-detects transport on first API call:
@@ -135,6 +136,7 @@ class BrowserBoxWebview extends HTMLElement {
     this.iframe.removeEventListener('load', this._boundLoad);
     this._stopInitPing();
     this._rejectPending(new Error('browserbox-webview disconnected'));
+    this.dispatchEvent(new CustomEvent('disconnected'));
   }
 
   attributeChangedCallback(name, oldValue, newValue) {
@@ -151,6 +153,7 @@ class BrowserBoxWebview extends HTMLElement {
       this._reconnectStopped = false;
       this._resetReadyPromise();
       this._rejectPending(new Error('browserbox-webview source changed'));
+      this.dispatchEvent(new CustomEvent('disconnected'));
       this._updateIframeSrcFromAttribute(name);
       return;
     }
@@ -222,6 +225,7 @@ class BrowserBoxWebview extends HTMLElement {
           return;
         }
         this.stopReconnectAttempts('iframe-unresponsive');
+        this.dispatchEvent(new CustomEvent('disconnected'));
         this.dispatchEvent(new CustomEvent('connect-failed', {
           detail: {
             reason: 'iframe-unresponsive',
@@ -241,7 +245,7 @@ class BrowserBoxWebview extends HTMLElement {
     const src = this.iframe.src;
     if (!src) return;
     const delay = Math.min(2000 * this._iframeRetryCount, 8000);
-    this._debugLog(
+    console.log(
       `[browserbox-webview] iframe not responsive after ${this._iframeRetryPingThreshold}s, `
       + `retry ${this._iframeRetryCount}/${this._iframeRetryMax} in ${delay}ms`
     );
@@ -254,21 +258,14 @@ class BrowserBoxWebview extends HTMLElement {
     }, delay);
   }
 
-  _isDebugEnabled() {
-    if (this.hasAttribute('debug')) {
-      const attr = (this.getAttribute('debug') || '').trim().toLowerCase();
-      return attr !== '0' && attr !== 'false' && attr !== 'off';
-    }
-    return Boolean(globalThis.BROWSERBOX_WEBVIEW_DEBUG || globalThis.__BROWSERBOX_WEBVIEW_DEBUG);
-  }
-
-  _debugLog(...args) {
-    if (!this._isDebugEnabled()) return;
-    console.log(...args);
-  }
-
   _assignIframeSrc(nextSrc, reason) {
-    void reason;
+    const stack = new Error().stack || '(no stack available)';
+    console.log('[DEBUG][SRC_ASSIGN]', {
+      reason,
+      currentSrc: this.iframe.src,
+      nextSrc,
+      stack,
+    });
     this.iframe.src = nextSrc;
   }
 
@@ -493,8 +490,10 @@ class BrowserBoxWebview extends HTMLElement {
       'createTab',
       'createTabs',
       'closeTab',
+      'closeTabById',
       'closeAllTabs',
       'switchToTab',
+      'switchToTabById',
       'navigateTo',
       'navigateTab',
       'submitOmnibox',
@@ -669,6 +668,13 @@ class BrowserBoxWebview extends HTMLElement {
         return true;
       },
 
+      async closeTabById(args, originalError) {
+        const tabId = typeof args[0] === 'string' && args[0].trim().length > 0 ? args[0].trim() : null;
+        if (!tabId) fail('Legacy closeTabById requires a non-empty targetId string', originalError);
+        self._postRaw({ type: 'closeTab', tabId, data: {} });
+        return true;
+      },
+
       async closeAllTabs(args) {
         const opts = args[0] || {};
         const keep = Number.isInteger(opts.keep) ? Math.max(0, opts.keep) : 0;
@@ -685,6 +691,13 @@ class BrowserBoxWebview extends HTMLElement {
       async switchToTab(args, originalError) {
         const tabId = await resolveTabId(args[0]);
         if (!tabId) fail('Legacy switchToTab failed: no target tab', originalError);
+        self._postRaw({ type: 'setActiveTab', tabId, data: {} });
+        return true;
+      },
+
+      async switchToTabById(args, originalError) {
+        const tabId = typeof args[0] === 'string' && args[0].trim().length > 0 ? args[0].trim() : null;
+        if (!tabId) fail('Legacy switchToTabById requires a non-empty targetId string', originalError);
         self._postRaw({ type: 'setActiveTab', tabId, data: {} });
         return true;
       },
@@ -802,12 +815,14 @@ class BrowserBoxWebview extends HTMLElement {
 
   // Canonical BrowserBox API wrappers
   switchToTab(index) { return this.callApi('switchToTab', index); }
+  switchToTabById(targetId) { return this.callApi('switchToTabById', targetId); }
   navigateTo(url, opts = {}) { return this.callApi('navigateTo', url, opts); }
   navigateTab(index, url, opts = {}) { return this.callApi('navigateTab', index, url, opts); }
   submitOmnibox(query, opts = {}) { return this.callApi('submitOmnibox', query, opts); }
   createTab(url = '') { return this.callApi('createTab', url); }
   createTabs(count, opts = {}) { return this.callApi('createTabs', count, opts); }
   closeTab(index = null) { return this.callApi('closeTab', index); }
+  closeTabById(targetId) { return this.callApi('closeTabById', targetId); }
   closeAllTabs(opts = {}) { return this.callApi('closeAllTabs', opts); }
   getTabs() { return this.callApi('getTabs'); }
   getFavicons() { return this.callApi('getFavicons'); }

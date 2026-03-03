@@ -41,6 +41,7 @@
  * | `did-stop-loading` | `{ tabId, url }` | Page load finished |
  * | `did-navigate` | `{ tabId, url }` | Navigation committed |
  * | `policy-denied` | `{ url, reason }` | Navigation blocked by policy |
+ * | `usability-changed` | `{ usable: boolean }` | Browser usability state changed |
  * | `disconnected` | — | Session ended (element removed or login-link changed) |
  *
  * ## Transport
@@ -108,6 +109,7 @@ class BrowserBoxWebview extends HTMLElement {
     this._pending = new Map();
     this._apiMethods = [];
     this._isReady = false;
+    this._usable = false;
     this._readyPromise = Promise.resolve(true);
     this._initPingTimer = null;
     this._transportMode = 'unknown';
@@ -119,6 +121,17 @@ class BrowserBoxWebview extends HTMLElement {
     this._iframeRetryPingThreshold = 10; // pings before retry
     this._initPingCount = 0;
     this._reconnectStopped = false;
+    this._silentRecoveryUsed = false;
+    this._silentRecoveryParam = 'bbx_embed_retry';
+
+    // Mid routing durability handshake state
+    this._routingMid = '';
+    this._midStorageKey = 'bbx.embedder.mid';
+    this._midSyncAcked = false;
+    this._midSyncTimer = null;
+    this._midSyncAttempt = 0;
+    this._midSyncMaxAttempts = 20;
+    this._midSyncIntervalMs = 1000;
 
     this._boundMessage = this._handleMessage.bind(this);
     this._boundLoad = this._handleLoad.bind(this);
@@ -135,7 +148,9 @@ class BrowserBoxWebview extends HTMLElement {
     window.removeEventListener('message', this._boundMessage);
     this.iframe.removeEventListener('load', this._boundLoad);
     this._stopInitPing();
+    this._stopMidSync();
     this._rejectPending(new Error('browserbox-webview disconnected'));
+    this._setUsable(false, 'disconnected');
     this.dispatchEvent(new CustomEvent('disconnected'));
   }
 
@@ -151,10 +166,12 @@ class BrowserBoxWebview extends HTMLElement {
       this._iframeRetryCount = 0;
       this._initPingCount = 0;
       this._reconnectStopped = false;
+      this._silentRecoveryUsed = false;
       this._resetReadyPromise();
       this._rejectPending(new Error('browserbox-webview source changed'));
       this.dispatchEvent(new CustomEvent('disconnected'));
       this._updateIframeSrcFromAttribute(name);
+      this._startMidSync('login-link-changed');
       return;
     }
     if (name === 'width' || name === 'height') {
@@ -171,6 +188,7 @@ class BrowserBoxWebview extends HTMLElement {
   _setReady() {
     if (!this._isReady) {
       this._isReady = true;
+      this._setUsable(true, 'ready');
       this._iframeRetryCount = 0;
       this._reconnectStopped = false;
       this._stopInitPing();
@@ -188,6 +206,52 @@ class BrowserBoxWebview extends HTMLElement {
     this._pending.clear();
   }
 
+  _setUsable(next, reason = '') {
+    const usable = Boolean(next);
+    if (this._usable === usable) return;
+    this._usable = usable;
+    this.dispatchEvent(new CustomEvent('usability-changed', {
+      detail: {
+        usable,
+        reason,
+      },
+    }));
+  }
+
+  async _withRetry(task, {
+    attempts = 3,
+    baseDelayMs = 250,
+    maxDelayMs = 1500,
+    shouldRetry = () => false,
+  } = {}) {
+    let attempt = 0;
+    let lastError = null;
+    while (attempt < attempts) {
+      try {
+        return await task(attempt);
+      } catch (error) {
+        lastError = error;
+        attempt += 1;
+        if (attempt >= attempts || !shouldRetry(error, attempt)) {
+          throw error;
+        }
+        const delayMs = Math.min(maxDelayMs, baseDelayMs * (2 ** (attempt - 1)));
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+    throw lastError || new Error('retry failed');
+  }
+
+  _isRetryableApiError(error) {
+    const message = String(error?.message || '').toLowerCase();
+    return (
+      message.includes('timed out')
+      || message.includes('not ready')
+      || message.includes('disconnected')
+      || message.includes('reconnect stopped')
+    );
+  }
+
   _handleLoad() {
     const needsReset = this._isReady;
     this._isReady = false;
@@ -199,6 +263,8 @@ class BrowserBoxWebview extends HTMLElement {
       this._iframeRetryCount = 0;
       this._resetReadyPromise();
     }
+    this._midSyncAcked = false;
+    this._startMidSync('iframe-load');
     this._startInitPing();
   }
 
@@ -224,15 +290,10 @@ class BrowserBoxWebview extends HTMLElement {
           this._retryIframeLoad();
           return;
         }
+        if (this._attemptSilentRecovery('iframe-unresponsive')) {
+          return;
+        }
         this.stopReconnectAttempts('iframe-unresponsive');
-        this.dispatchEvent(new CustomEvent('disconnected'));
-        this.dispatchEvent(new CustomEvent('connect-failed', {
-          detail: {
-            reason: 'iframe-unresponsive',
-            attempts: this._iframeRetryCount,
-            maxAttempts: this._iframeRetryMax,
-          },
-        }));
         return;
       }
       this._postRaw({ type: 'init' });
@@ -278,9 +339,54 @@ class BrowserBoxWebview extends HTMLElement {
     }
   }
 
+  _attemptSilentRecovery(reason) {
+    if (this._silentRecoveryUsed) {
+      return false;
+    }
+    const currentSrc = this._normalizeUrl(this.iframe.src || this.getAttribute('login-link'));
+    if (!currentSrc) {
+      return false;
+    }
+
+    let nextSrc;
+    try {
+      const parsed = new URL(currentSrc, window.location.href);
+      const existingAttempt = Number(parsed.searchParams.get(this._silentRecoveryParam) || 0);
+      if (!Number.isFinite(existingAttempt) || existingAttempt >= 1) {
+        return false;
+      }
+      parsed.searchParams.set(this._silentRecoveryParam, String(existingAttempt + 1));
+      // Cache-bust to avoid stale iframe boot assets after session/token rotation.
+      parsed.searchParams.set('bbx_recover_t', String(Date.now()));
+      nextSrc = parsed.href;
+    } catch {
+      return false;
+    }
+
+    this._silentRecoveryUsed = true;
+    this._isReady = false;
+    this._apiMethods = [];
+    this._transportMode = 'unknown';
+    this._legacyTabsCache = [];
+    this._iframeRetryCount = 0;
+    this._initPingCount = 0;
+    this._midSyncAcked = false;
+    this._reconnectStopped = false;
+    this._resetReadyPromise();
+    this._rejectPending(new Error(`browserbox-webview silent recovery (${reason})`));
+
+    console.info('[browserbox-webview] attempting one-shot silent recovery reload', {
+      reason,
+      nextSrc,
+    });
+    this._assignIframeSrc(nextSrc, 'silent-recovery');
+    return true;
+  }
+
   _updateIframeSrcFromAttribute(trigger) {
     const loginLink = this.getAttribute('login-link');
     if (!loginLink) return;
+    this._refreshRoutingMid(loginLink);
     const normalizedCurrent = this._normalizeUrl(this.iframe.src);
     const normalizedNext = this._normalizeUrl(loginLink);
     if (normalizedCurrent === normalizedNext) {
@@ -300,6 +406,118 @@ class BrowserBoxWebview extends HTMLElement {
     if (this._initPingTimer) {
       clearInterval(this._initPingTimer);
       this._initPingTimer = null;
+    }
+  }
+
+  _normalizeMid(value) {
+    const mid = String(value || '').trim();
+    return /^[A-Za-z0-9-]{6,64}$/.test(mid) ? mid : '';
+  }
+
+  _refreshRoutingMid(loginLink = this.getAttribute('login-link')) {
+    let storageKey = this._midStorageKey;
+    let midFromLogin = '';
+    try {
+      const parsed = new URL(loginLink || '', window.location.href);
+      storageKey = `bbx.embedder.mid:${parsed.origin}`;
+      midFromLogin = this._normalizeMid(parsed.searchParams.get('mid'));
+    } catch {
+      // Keep fallback values when login-link is not parseable.
+    }
+
+    let persistedMid = '';
+    try {
+      persistedMid = this._normalizeMid(window.localStorage?.getItem?.(storageKey));
+    } catch {
+      // Storage may be blocked in some embedding contexts.
+    }
+
+    const resolvedMid = midFromLogin || persistedMid || this._routingMid;
+    this._midStorageKey = storageKey;
+    this._routingMid = resolvedMid || '';
+
+    if (midFromLogin) {
+      try {
+        window.localStorage?.setItem?.(storageKey, midFromLogin);
+      } catch {
+        // Storage writes are best-effort only.
+      }
+    }
+
+    if (this._routingMid) {
+      this.setAttribute('routing-mid', this._routingMid);
+    } else {
+      this.removeAttribute('routing-mid');
+    }
+    if (this._routingMid) {
+      console.info('[bbx-mid] routing mid resolved', {
+        mid: this._routingMid,
+        source: midFromLogin ? 'login-link' : (persistedMid ? 'storage' : 'memory'),
+      });
+    } else {
+      console.info('[bbx-mid] no routing mid resolved');
+    }
+    return this._routingMid;
+  }
+
+  _postMidSync(reason = '') {
+    const mid = this._refreshRoutingMid();
+    if (!mid || !this.iframe.contentWindow) {
+      return false;
+    }
+    this._postRaw({
+      type: 'bbx-mid-sync',
+      data: {
+        mid,
+        reason,
+        attempt: this._midSyncAttempt,
+      },
+    });
+    console.info('[bbx-mid] sent sync', {
+      mid,
+      reason,
+      attempt: this._midSyncAttempt,
+    });
+    return true;
+  }
+
+  _startMidSync(reason = 'start') {
+    this._stopMidSync();
+    this._midSyncAcked = false;
+    this._midSyncAttempt = 0;
+    if (!this._postMidSync(reason)) {
+      return;
+    }
+    this._midSyncAttempt = 1;
+    this._midSyncTimer = setInterval(() => {
+      if (this._midSyncAcked) {
+        this._stopMidSync();
+        return;
+      }
+      if (this._midSyncAttempt >= this._midSyncMaxAttempts) {
+        this._stopMidSync();
+        console.warn('[bbx-mid] sync timeout', {
+          attempts: this._midSyncAttempt,
+          mid: this._routingMid,
+        });
+        this.dispatchEvent(new CustomEvent('mid-sync-timeout', {
+          detail: {
+            attempts: this._midSyncAttempt,
+            mid: this._routingMid,
+          },
+        }));
+        this._setUsable(false, 'mid-sync-timeout');
+        return;
+      }
+      this._midSyncAttempt += 1;
+      this._postMidSync('retry');
+    }, this._midSyncIntervalMs);
+  }
+
+  _stopMidSync() {
+    if (this._midSyncTimer) {
+      clearInterval(this._midSyncTimer);
+      this._midSyncTimer = null;
     }
   }
 
@@ -376,6 +594,40 @@ class BrowserBoxWebview extends HTMLElement {
 
     const payload = event.data || {};
     if (typeof payload.type !== 'string') {
+      return;
+    }
+
+    if (payload.type === 'bbx-mid-request') {
+      console.info('[bbx-mid] child requested mid');
+      this._postMidSync('child-request');
+      return;
+    }
+
+    if (payload.type === 'bbx-mid-ack') {
+      const ackMid = this._normalizeMid(payload.data?.mid ?? payload.mid);
+      console.info('[bbx-mid] received ack', {
+        ackMid,
+        expectedMid: this._routingMid,
+      });
+      if (this._routingMid && (!ackMid || ackMid === this._routingMid)) {
+        this._midSyncAcked = true;
+        this._stopMidSync();
+        console.info('[bbx-mid] sync established', {
+          mid: this._routingMid,
+          attempts: Math.max(1, this._midSyncAttempt),
+        });
+        this.dispatchEvent(new CustomEvent('mid-synced', {
+          detail: {
+            mid: this._routingMid,
+            attempts: Math.max(1, this._midSyncAttempt),
+          },
+        }));
+      } else {
+        console.warn('[bbx-mid] ack mid mismatch', {
+          ackMid,
+          expectedMid: this._routingMid,
+        });
+      }
       return;
     }
 
@@ -561,20 +813,210 @@ class BrowserBoxWebview extends HTMLElement {
     if (typeof method !== 'string' || method.trim().length === 0) {
       throw new Error('callApi(method, ...args) requires a non-empty method string.');
     }
-    await this._ensureReadyForApi();
-    const normalizedMethod = method.trim();
+    const invoke = async () => {
+      await this._ensureReadyForApi();
+      const normalizedMethod = method.trim();
 
-    if (this._transportMode === 'unknown') {
-      await this._resolveTransport();
+      if (this._transportMode === 'unknown') {
+        await this._resolveTransport();
+      }
+
+      if (this._transportMode === 'legacy') {
+        return this._legacyCall(normalizedMethod, args);
+      }
+
+      return this._request('bbx-api-call', { method: normalizedMethod, args }, {
+        timeoutMs: this.requestTimeoutMs,
+      });
+    };
+
+    try {
+      const result = await this._withRetry(invoke, {
+        attempts: 3,
+        baseDelayMs: 300,
+        maxDelayMs: 1500,
+        shouldRetry: (error) => this._isRetryableApiError(error),
+      });
+      this._setUsable(true, 'api-ok');
+      return result;
+    } catch (error) {
+      if (this._isRetryableApiError(error)) {
+        this._setUsable(false, 'api-failed');
+      }
+      throw error;
     }
+  }
 
-    if (this._transportMode === 'legacy') {
-      return this._legacyCall(normalizedMethod, args);
+  // Canonical BrowserBox API wrappers
+  switchToTab(index) { return this.callApi('switchToTab', index); }
+  switchToTabById(targetId) { return this.callApi('switchToTabById', targetId); }
+  navigateTo(url, opts = {}) { return this.callApi('navigateTo', url, opts); }
+  navigateTab(index, url, opts = {}) { return this.callApi('navigateTab', index, url, opts); }
+  submitOmnibox(query, opts = {}) { return this.callApi('submitOmnibox', query, opts); }
+  createTab(url = '') { return this.callApi('createTab', url); }
+  createTabs(count, opts = {}) { return this.callApi('createTabs', count, opts); }
+  closeTab(index = null) { return this.callApi('closeTab', index); }
+  closeTabById(targetId) { return this.callApi('closeTabById', targetId); }
+  closeAllTabs(opts = {}) { return this.callApi('closeAllTabs', opts); }
+  getTabs() { return this.callApi('getTabs'); }
+  getFavicons() { return this.callApi('getFavicons'); }
+  waitForNonDefaultFavicon(index, opts = {}) { return this.callApi('waitForNonDefaultFavicon', index, opts); }
+  waitForTabCount(expectedCount, opts = {}) { return this.callApi('waitForTabCount', expectedCount, opts); }
+  waitForTabUrl(index, opts = {}) { return this.callApi('waitForTabUrl', index, opts); }
+  getActiveTabIndex() { return this.callApi('getActiveTabIndex'); }
+  getTabCount() { return this.callApi('getTabCount'); }
+  reload() { return this.callApi('reload'); }
+  goBack() { return this.callApi('goBack'); }
+  goForward() { return this.callApi('goForward'); }
+  stop() { return this.callApi('stop'); }
+  getScreenMetrics() { return this.callApi('getScreenMetrics'); }
+  getTransportDiagnostics() { return this.callApi('getTransportDiagnostics'); }
+  async health({ timeoutMs } = {}) {
+    if (!this.iframe.contentWindow) {
+      this._setUsable(false, 'iframe-not-ready');
+      throw new Error('browserbox-webview health check failed: iframe is not ready.');
     }
+    const effectiveTimeoutMs = Number.isFinite(timeoutMs)
+      ? Math.max(100, Math.round(timeoutMs))
+      : Math.min(this.requestTimeoutMs, 8000);
+    const tryModern = () => this._request(
+      'bbx-api-call',
+      { method: 'getTabCount', args: [] },
+      { timeoutMs: effectiveTimeoutMs },
+    );
+    const tryLegacy = () => this._request('getTabCount', {}, { timeoutMs: effectiveTimeoutMs });
 
-    return this._request('bbx-api-call', { method: normalizedMethod, args }, {
-      timeoutMs: this.requestTimeoutMs,
-    });
+    try {
+      const result = await this._withRetry(async () => {
+        if (this._transportMode === 'modern') {
+          await tryModern();
+          return true;
+        }
+        if (this._transportMode === 'legacy') {
+          await tryLegacy();
+          return true;
+        }
+        try {
+          await tryModern();
+          this._transportMode = 'modern';
+          return true;
+        } catch (modernError) {
+          try {
+            await tryLegacy();
+            this._transportMode = 'legacy';
+            return true;
+          } catch (legacyError) {
+            const message = `browserbox-webview health check failed after ${effectiveTimeoutMs}ms `
+              + `(modern error: ${modernError instanceof Error ? modernError.message : String(modernError)}; `
+              + `legacy error: ${legacyError instanceof Error ? legacyError.message : String(legacyError)})`;
+            throw new Error(message, { cause: legacyError });
+          }
+        }
+      }, {
+        attempts: 2,
+        baseDelayMs: 250,
+        maxDelayMs: 750,
+        shouldRetry: (error) => this._isRetryableApiError(error),
+      });
+      this._setUsable(true, 'health-ok');
+      return result;
+    } catch (error) {
+      this._setUsable(false, 'health-failed');
+      throw error;
+    }
+  }
+
+  // Automation surface
+  waitForSelector(selector, opts = {}) { return this.callApi('waitForSelector', selector, opts); }
+  click(selector, opts = {}) { return this.callApi('click', selector, opts); }
+  type(selector, text, opts = {}) { return this.callApi('type', selector, text, opts); }
+  evaluate(expression, opts = {}) { return this.callApi('evaluate', expression, opts); }
+  waitForNavigation(opts = {}) { return this.callApi('waitForNavigation', opts); }
+
+  refresh() {
+    if (this.iframe.src) {
+      this._isReady = false;
+      this._apiMethods = [];
+      this._transportMode = 'unknown';
+      this._legacyTabsCache = [];
+      this._reconnectStopped = false;
+      this._midSyncAcked = false;
+      this._resetReadyPromise();
+      this._rejectPending(new Error('browserbox-webview refreshed'));
+      const currentSrc = this.iframe.src;
+      this._assignIframeSrc(currentSrc, 'refresh');
+    }
+  }
+
+  stopReconnectAttempts(reason = 'manual-stop') {
+    this._reconnectStopped = true;
+    this._stopInitPing();
+    this._stopMidSync();
+    this._setUsable(false, reason);
+    this._rejectPending(new Error(`browserbox-webview reconnect stopped (${reason})`));
+  }
+
+  updateIframe() {
+    this._refreshRoutingMid();
+    this._updateIframeSrcFromAttribute('updateIframe');
+    this._applyHostDimensions();
+  }
+
+  get loginLink() {
+    return this.getAttribute('login-link');
+  }
+
+  set loginLink(value) {
+    if (value) this.setAttribute('login-link', value);
+    else this.removeAttribute('login-link');
+  }
+
+  get routingMid() {
+    return this._routingMid || '';
+  }
+
+  get width() {
+    return this.getAttribute('width');
+  }
+
+  set width(value) {
+    if (value) this.setAttribute('width', value);
+    else this.removeAttribute('width');
+  }
+
+  get height() {
+    return this.getAttribute('height');
+  }
+
+  set height(value) {
+    if (value) this.setAttribute('height', value);
+    else this.removeAttribute('height');
+  }
+
+  get parentOrigin() {
+    return this.getAttribute('parent-origin') || '*';
+  }
+
+  set parentOrigin(value) {
+    if (value) this.setAttribute('parent-origin', value);
+    else this.removeAttribute('parent-origin');
+  }
+
+  get requestTimeoutMs() {
+    const raw = this.getAttribute('request-timeout-ms');
+    const parsed = Number.parseInt(raw || '30000', 10);
+    if (!Number.isFinite(parsed) || parsed < 100) {
+      return 30000;
+    }
+    return parsed;
+  }
+
+  set requestTimeoutMs(value) {
+    if (value === null || value === undefined) {
+      this.removeAttribute('request-timeout-ms');
+      return;
+    }
+    this.setAttribute('request-timeout-ms', String(value));
   }
 
   /**
@@ -813,156 +1255,6 @@ class BrowserBoxWebview extends HTMLElement {
     return this.__legacyHandlers;
   }
 
-  // Canonical BrowserBox API wrappers
-  switchToTab(index) { return this.callApi('switchToTab', index); }
-  switchToTabById(targetId) { return this.callApi('switchToTabById', targetId); }
-  navigateTo(url, opts = {}) { return this.callApi('navigateTo', url, opts); }
-  navigateTab(index, url, opts = {}) { return this.callApi('navigateTab', index, url, opts); }
-  submitOmnibox(query, opts = {}) { return this.callApi('submitOmnibox', query, opts); }
-  createTab(url = '') { return this.callApi('createTab', url); }
-  createTabs(count, opts = {}) { return this.callApi('createTabs', count, opts); }
-  closeTab(index = null) { return this.callApi('closeTab', index); }
-  closeTabById(targetId) { return this.callApi('closeTabById', targetId); }
-  closeAllTabs(opts = {}) { return this.callApi('closeAllTabs', opts); }
-  getTabs() { return this.callApi('getTabs'); }
-  getFavicons() { return this.callApi('getFavicons'); }
-  waitForNonDefaultFavicon(index, opts = {}) { return this.callApi('waitForNonDefaultFavicon', index, opts); }
-  waitForTabCount(expectedCount, opts = {}) { return this.callApi('waitForTabCount', expectedCount, opts); }
-  waitForTabUrl(index, opts = {}) { return this.callApi('waitForTabUrl', index, opts); }
-  getActiveTabIndex() { return this.callApi('getActiveTabIndex'); }
-  getTabCount() { return this.callApi('getTabCount'); }
-  reload() { return this.callApi('reload'); }
-  goBack() { return this.callApi('goBack'); }
-  goForward() { return this.callApi('goForward'); }
-  stop() { return this.callApi('stop'); }
-  getScreenMetrics() { return this.callApi('getScreenMetrics'); }
-  getTransportDiagnostics() { return this.callApi('getTransportDiagnostics'); }
-  async health({ timeoutMs } = {}) {
-    if (!this.iframe.contentWindow) {
-      throw new Error('browserbox-webview health check failed: iframe is not ready.');
-    }
-    const effectiveTimeoutMs = Number.isFinite(timeoutMs)
-      ? Math.max(100, Math.round(timeoutMs))
-      : Math.min(this.requestTimeoutMs, 8000);
-    const tryModern = () => this._request(
-      'bbx-api-call',
-      { method: 'getTabCount', args: [] },
-      { timeoutMs: effectiveTimeoutMs },
-    );
-    const tryLegacy = () => this._request('getTabCount', {}, { timeoutMs: effectiveTimeoutMs });
-
-    if (this._transportMode === 'modern') {
-      await tryModern();
-      return true;
-    }
-    if (this._transportMode === 'legacy') {
-      await tryLegacy();
-      return true;
-    }
-
-    try {
-      await tryModern();
-      this._transportMode = 'modern';
-      return true;
-    } catch (modernError) {
-      try {
-        await tryLegacy();
-        this._transportMode = 'legacy';
-        return true;
-      } catch (legacyError) {
-        throw new Error(
-          `browserbox-webview health check failed after ${effectiveTimeoutMs}ms `
-          + `(modern error: ${modernError instanceof Error ? modernError.message : String(modernError)}; `
-          + `legacy error: ${legacyError instanceof Error ? legacyError.message : String(legacyError)})`
-        );
-      }
-    }
-  }
-
-  // Automation surface
-  waitForSelector(selector, opts = {}) { return this.callApi('waitForSelector', selector, opts); }
-  click(selector, opts = {}) { return this.callApi('click', selector, opts); }
-  type(selector, text, opts = {}) { return this.callApi('type', selector, text, opts); }
-  evaluate(expression, opts = {}) { return this.callApi('evaluate', expression, opts); }
-  waitForNavigation(opts = {}) { return this.callApi('waitForNavigation', opts); }
-
-  refresh() {
-    if (this.iframe.src) {
-      this._isReady = false;
-      this._apiMethods = [];
-      this._transportMode = 'unknown';
-      this._legacyTabsCache = [];
-      this._reconnectStopped = false;
-      this._resetReadyPromise();
-      this._rejectPending(new Error('browserbox-webview refreshed'));
-      const currentSrc = this.iframe.src;
-      this._assignIframeSrc(currentSrc, 'refresh');
-    }
-  }
-
-  stopReconnectAttempts(reason = 'manual-stop') {
-    this._reconnectStopped = true;
-    this._stopInitPing();
-    this._rejectPending(new Error(`browserbox-webview reconnect stopped (${reason})`));
-  }
-
-  updateIframe() {
-    this._updateIframeSrcFromAttribute('updateIframe');
-    this._applyHostDimensions();
-  }
-
-  get loginLink() {
-    return this.getAttribute('login-link');
-  }
-
-  set loginLink(value) {
-    if (value) this.setAttribute('login-link', value);
-    else this.removeAttribute('login-link');
-  }
-
-  get width() {
-    return this.getAttribute('width');
-  }
-
-  set width(value) {
-    if (value) this.setAttribute('width', value);
-    else this.removeAttribute('width');
-  }
-
-  get height() {
-    return this.getAttribute('height');
-  }
-
-  set height(value) {
-    if (value) this.setAttribute('height', value);
-    else this.removeAttribute('height');
-  }
-
-  get parentOrigin() {
-    return this.getAttribute('parent-origin') || '*';
-  }
-
-  set parentOrigin(value) {
-    if (value) this.setAttribute('parent-origin', value);
-    else this.removeAttribute('parent-origin');
-  }
-
-  get requestTimeoutMs() {
-    const raw = this.getAttribute('request-timeout-ms');
-    const parsed = Number.parseInt(raw || '30000', 10);
-    if (!Number.isFinite(parsed) || parsed < 100) {
-      return 30000;
-    }
-    return parsed;
-  }
-
-  set requestTimeoutMs(value) {
-    if (value === null || value === undefined) {
-      this.removeAttribute('request-timeout-ms');
-      return;
-    }
-    this.setAttribute('request-timeout-ms', String(value));
-  }
 }
 
 if (!customElements.get('browserbox-webview')) {

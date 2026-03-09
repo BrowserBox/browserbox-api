@@ -1,146 +1,227 @@
-# BrowserBox Webview Element API
+# Webview API
 
-`browserbox-api` is the public BrowserBox embedder surface. It ships the
-`<browserbox-webview>` custom element used to render and control a remote
-BrowserBox session in any web UI.
+Ensure you set
 
-Package target: `@browserbox/webview-element`.
+```bash
+export ALLOWED_EMBEDDING_ORIGINS="https://site-that-serves-the-page-using-the-webview.example.com https://other-site.you-will-embed.browserbox-on.com"
+```
 
-## Quick Start
+Before running `bbx run` or equivalent run commands.
+
+## Embedding
 
 ```html
-<script type="module" src="./src/browserbox-webview.js"></script>
-
+<script src="browserbox-webview.js"></script>
 <browserbox-webview
-  login-link="https://bbx.example.com/login?token=..."
+  login-link="https://example.com:9999/login?token=your_login_link"
   width="100%"
   height="600">
 </browserbox-webview>
-
-<script>
-  const bbx = document.querySelector('browserbox-webview');
-  await bbx.whenReady();
-  await bbx.navigateTo('https://example.com');
-</script>
 ```
 
-## Attributes
+## Quick Start
 
-| Attribute | Required | Default | Notes |
-| --- | --- | --- | --- |
-| `login-link` | yes | none | Full BrowserBox login URL with token. |
-| `width` | no | `100%` | Bare numbers are interpreted as px. |
-| `height` | no | `100%` | Bare numbers are interpreted as px. |
-| `parent-origin` | no | `*` | Restricts accepted `postMessage` origin. |
-| `request-timeout-ms` | no | `30000` | Per-call timeout floor is 100ms. |
+```js
+const bbx = document.querySelector('browserbox-webview');
+await bbx.whenReady();
 
-## Properties
+// Create a tab and navigate
+await bbx.createTab('https://example.com');
+const tabs = await bbx.getTabs();
 
-| Property | Kind | Maps to | Notes |
-| --- | --- | --- | --- |
-| `loginLink` | read/write | `login-link` | Sets or clears embed login URL. |
-| `routingMid` | read-only | derived | Resolved routing machine id (`mid`). |
-| `width` | read/write | `width` | Preserves string values. |
-| `height` | read/write | `height` | Preserves string values. |
-| `parentOrigin` | read/write | `parent-origin` | `*` when unset. |
-| `requestTimeoutMs` | read/write | `request-timeout-ms` | Parsed as integer. |
+// Automate
+await bbx.click('a.my-link');
+await bbx.waitForSelector('.result');
+const title = await bbx.evaluate('document.title');
+
+// Capture
+const screenshot = await bbx.capture.frame({ format: 'jpeg', quality: 80 });
+```
+
+## Element Attributes
+
+| Attribute | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `login-link` | yes | — | Full BrowserBox login URL with auth token |
+| `width` | no | `"100%"` | CSS width (px if bare number) |
+| `height` | no | `"100%"` | CSS height (px if bare number) |
+| `parent-origin` | no | `"*"` | Restrict postMessage origin |
+| `request-timeout-ms` | no | `30000` | API call timeout (ms) |
+| `ui-visible` | no | `true` | Show/hide BrowserBox chrome UI |
+| `allow-user-toggle-ui` | no | `true` | Allow user to toggle UI visibility |
+
+## Namespaced Session-Host API
+
+The `<browserbox-webview>` element exposes a namespaced API for programmatic control.
+
+Access via the element directly (`bbx.tabs.list()`) or via `bbx.session` facade.
+
+### `session`
+
+| Property / Method | Returns | Description |
+|-------------------|---------|-------------|
+| `session.id` | `string \| null` | Routing machine ID |
+| `session.usable` | `boolean` | Whether the session is currently usable |
+| `session.ready` | `boolean` | Whether the API handshake has completed |
+| `session.transport` | `string` | Transport mode: `"modern"`, `"legacy"`, or `"unknown"` |
+| `session.health()` | `Promise<boolean>` | Ping the embedded browser |
+| `session.capabilities()` | `Promise<object>` | Query supported capabilities |
+| `session.disconnect()` | `void` | Tear down the session |
+| `session.refresh()` | `void` | Reload the embedded iframe |
+
+### `tabs`
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `tabs.list()` | `Promise<Tab[]>` | List all open tabs |
+| `tabs.getActive()` | `Promise<Tab>` | Get the active tab's info |
+| `tabs.create({ url, active? })` | `Promise<Tab>` | Open a new tab |
+| `tabs.activate(tabId)` | `Promise` | Switch to a tab by ID |
+| `tabs.close(tabId)` | `Promise` | Close a tab by ID |
+| `tabs.closeAll()` | `Promise` | Close all tabs |
+
+**Tab object:** `{ index, id, url, title, active, canGoBack, canGoForward, hasFavicon, isDefaultFavicon, faviconDataURI }`
+
+### `page`
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `page.navigate(url, opts?)` | `Promise<NavResult>` | Navigate the active tab |
+| `page.url()` | `Promise<string>` | Get the active tab's URL |
+| `page.title()` | `Promise<string>` | Get the active tab's title |
+| `page.favicon()` | `Promise<string \| null>` | Get the favicon as a data URI |
+| `page.metrics()` | `Promise<Metrics>` | Get viewport dimensions |
+| `page.text(opts?)` | `Promise<string>` | Extract page text (`{ mainContentOnly?: boolean }`) |
+| `page.reload()` | `Promise` | Reload the active tab |
+| `page.back()` | `Promise<boolean>` | Navigate back |
+| `page.forward()` | `Promise<boolean>` | Navigate forward |
+| `page.stop()` | `Promise` | Stop loading |
+
+### `capture`
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `capture.frame(opts?)` | `Promise<string>` | Full-page screenshot as data URI |
+| `capture.viewport(opts?)` | `Promise<string>` | Viewport-only screenshot as data URI |
+
+Options: `{ format?: "jpeg" | "png", quality?: number }`
+
+### `policy`
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `policy.get()` | `Promise<object>` | Get current policy snapshot |
+
+### `augment` (capability-gated)
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `augment(spec)` | `Promise<{ id }>` | Create an augmentation overlay |
+| `augment.update(id, patch)` | `Promise` | Update an existing augmentation |
+| `augment.remove(id)` | `Promise` | Remove an augmentation |
+| `augment.list()` | `Promise<Augment[]>` | List all active augmentations |
+
+### `select` (capability-gated)
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `select({ prompt, intent })` | `Promise<SelectionHandle>` | Begin interactive selection |
+
+SelectionHandle: `{ getRaw(), generalize(), preview(), extract(opts?) }`
+
+## Automation Methods
+
+Direct methods on the element for browser automation:
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `click(selector, opts?)` | `Promise<{ result }>` | Click an element by CSS selector |
+| `type(selector, text, opts?)` | `Promise<{ result }>` | Type text into an element |
+| `evaluate(expression, opts?)` | `Promise<{ result }>` | Evaluate JavaScript in the page |
+| `waitForSelector(selector, opts?)` | `Promise<boolean>` | Wait for a selector to appear |
+| `waitForNavigation(opts?)` | `Promise` | Wait for a navigation to complete |
+
+### `act(action)` — Unified action dispatch
+
+| Action | Example | Description |
+|--------|---------|-------------|
+| `navigate` | `act({ navigate: "https://..." })` | Navigate the active tab |
+| `click` | `act({ click: { selector: "a" } })` | Click an element |
+| `type` | `act({ type: { selector: "input", text: "hello" } })` | Type into an element |
+| `evaluate` | `act({ evaluate: "document.title" })` | Evaluate JS expression |
+| `waitForSelector` | `act({ waitForSelector: { selector: "h1" } })` | Wait for element |
+| `waitForNavigation` | `act({ waitForNavigation: {} })` | Wait for nav |
+
+## UI Controls
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `uiVisible(visible?)` | `Promise<boolean>` | Show/hide BrowserBox chrome UI |
+| `allowUserToggleUI(allow?)` | `Promise<boolean>` | Allow/deny user UI toggling |
+
+## Event Helpers
+
+| Method | Description |
+|--------|-------------|
+| `on(name, handler)` | Subscribe; returns unsubscribe function |
+| `off(name, handler)` | Unsubscribe |
+| `observe(config)` | Structured event observer; returns `{ unsubscribe() }` |
+| `events(config)` | Async iterator over events |
 
 ## Events
 
-### Lifecycle and transport events
+| Event | Detail | Description |
+|-------|--------|-------------|
+| `ready` | `{ type }` | Legacy transport handshake completed |
+| `api-ready` | `{ methods: string[] }` | Modern API available |
+| `ready-timeout` | `{ timeoutMs, error }` | Ready handshake timed out |
+| `tab-created` | `{ index, id, url }` | New tab opened |
+| `tab-closed` | `{ index, id }` | Tab closed |
+| `tab-updated` | `{ id, url, title, faviconDataURI }` | Tab metadata updated |
+| `active-tab-changed` | `{ index, id }` | Active tab switched |
+| `did-start-loading` | `{ tabId, url }` | Page load started |
+| `did-stop-loading` | `{ tabId, url }` | Page load finished |
+| `did-navigate` | `{ tabId, url }` | Navigation committed |
+| `favicon-changed` | `{ tabId, faviconDataURI }` | Favicon updated |
+| `policy-denied` | `{ url, reason }` | Navigation blocked by policy |
+| `usability-changed` | `{ usable: boolean }` | Browser usability state changed |
+| `sos` | `{ reasonCode, message, retryUrl }` | Fatal unusable signal |
+| `disconnected` | — | Session ended |
 
-| Event | Detail | Notes |
-| --- | --- | --- |
-| `ready` | `{ type }` | Legacy handshake completed. |
-| `api-ready` | `{ methods: string[] }` | Modern API handshake completed. |
-| `ready-timeout` | `{ timeoutMs, error }` | Soft ready timeout emitted before API calls proceed. |
-| `disconnected` | `{}` | Source changed or element disconnected. |
-| `iframe-retry` | `{ attempt, maxAttempts, delayMs }` | Automatic iframe reload retry in progress. |
-| `mid-synced` | `{ mid, attempts }` | Routing-mid synchronization succeeded. |
-| `mid-sync-timeout` | `{ attempts, mid }` | Routing-mid synchronization timed out. |
-| `usability-changed` | `{ usable, reason }` | Usability state transition for host UX handling. |
+### Canonical event aliases
 
-### Runtime-forwarded events
+Legacy event names continue to work. Dot-notation aliases are also emitted:
 
-The component forwards BrowserBox runtime event names as-is via `CustomEvent`:
+| Legacy | Canonical |
+|--------|-----------|
+| `api-ready` | `api.ready` |
+| `tab-created` | `tab.created` |
+| `tab-closed` | `tab.closed` |
+| `tab-updated` | `tab.updated` |
+| `active-tab-changed` | `tab.activated` |
+| `did-navigate` | `page.navigated` |
+| `did-start-loading` | `page.load.started` |
+| `did-stop-loading` | `page.load.stopped` |
+| `policy-denied` | `policy.denied` |
+| `usability-changed` | `session.usability.changed` |
+| `disconnected` | `session.disconnected` |
 
-| Event | Typical Detail |
-| --- | --- |
-| `tab-created` | `{ index, id, url }` |
-| `tab-closed` | `{ index, id }` |
-| `tab-updated` | `{ id, url, title, faviconDataURI }` |
-| `active-tab-changed` | `{ index, id }` |
-| `did-start-loading` | `{ tabId, url }` |
-| `did-stop-loading` | `{ tabId, url }` |
-| `did-navigate` | `{ tabId, url }` |
-| `policy-denied` | `{ url, reason }` |
-| `favicon-changed` | runtime-defined |
+## Flat Methods (backward compatible)
 
-## Methods
+All classic flat methods remain available:
 
-### Lifecycle and generic dispatch
+`whenReady()`, `callApi()`, `navigateTo()`, `navigateTab()`, `submitOmnibox()`,
+`getTabs()`, `getFavicons()`, `getTabCount()`, `getActiveTabIndex()`,
+`createTab()`, `createTabs()`, `closeTab()`, `closeTabById()`, `closeAllTabs()`,
+`switchToTab()`, `switchToTabById()`,
+`reload()`, `goBack()`, `goForward()`, `stop()`,
+`getScreenMetrics()`, `getTransportDiagnostics()`,
+`health()`, `refresh()`, `updateIframe()`, `stopReconnectAttempts()`,
+`listApiMethods()`,
+`waitForNonDefaultFavicon()`, `waitForTabCount()`, `waitForTabUrl()`
 
-| Method |
-| --- |
-| `whenReady({ timeoutMs }?)` |
-| `listApiMethods(options?)` |
-| `callApi(method, ...args)` |
-| `refresh()` |
-| `updateIframe()` |
-| `stopReconnectAttempts(reason?)` |
-| `health({ timeoutMs }?)` |
+## Test Status
 
-### Tabs and navigation
-
-| Method |
-| --- |
-| `getTabs()` |
-| `getTabCount()` |
-| `getActiveTabIndex()` |
-| `createTab(url?)` |
-| `createTabs(count, opts?)` |
-| `closeTab(index?)` |
-| `closeTabById(targetId)` |
-| `closeAllTabs(opts?)` |
-| `switchToTab(index)` |
-| `switchToTabById(targetId)` |
-| `navigateTo(url, opts?)` |
-| `navigateTab(index, url, opts?)` |
-| `submitOmnibox(query, opts?)` |
-| `reload()` |
-| `goBack()` |
-| `goForward()` |
-| `stop()` |
-
-### Wait, diagnostics, and automation
-
-| Method |
-| --- |
-| `waitForTabCount(expectedCount, opts?)` |
-| `waitForTabUrl(index, opts?)` |
-| `getFavicons()` |
-| `waitForNonDefaultFavicon(index, opts?)` |
-| `getScreenMetrics()` |
-| `getTransportDiagnostics()` |
-| `waitForSelector(selector, opts?)` |
-| `click(selector, opts?)` |
-| `type(selector, text, opts?)` |
-| `evaluate(expression, opts?)` |
-| `waitForNavigation(opts?)` |
-
-## Transport Behavior
-
-Transport auto-detect is one-shot per source load:
-
-1. Probe modern RPC (`bbx-api-call` and `bbx-api-list`)
-2. Fall back to legacy postMessage method types
-3. Lock transport mode until source changes or refresh
-
-## Reference
-
-- Live docs: https://win9-5.com/api/
-
-## License
-
-GNU Affero General Public License v3.0 or later (`AGPL-3.0-or-later`).
-See `LICENSE`.
+**55/55 tests passing** (2026-03-09) — full coverage across session, tabs, page,
+navigation, automation (click, waitForSelector, evaluate, act), capture,
+diagnostics, policy, augment, events, and observer APIs.

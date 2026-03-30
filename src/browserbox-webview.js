@@ -36,6 +36,7 @@
  * | `api-ready` | `{ methods: string[] }` | Modern API available |
  * | `ready-timeout` | `{ timeoutMs, error }` | Ready handshake timed out |
  * | `tab-created` | `{ index, id, url }` | New tab opened |
+ * | `tab-attached` | `{ id, url, title }` | Existing/created tab attached to a session |
  * | `tab-closed` | `{ index, id }` | Tab closed |
  * | `active-tab-changed` | `{ index, id }` | Active tab switched |
  * | `tab-updated` | `{ id, url, title, faviconDataURI }` | Tab metadata updated |
@@ -713,6 +714,7 @@ const EVENT_ALIAS_MAP = {
   'iframe-retry': ['session.retry'],
   disconnected: ['session.disconnected'],
   'tab-created': ['tab.created'],
+  'tab-attached': ['tab.attached'],
   'tab-closed': ['tab.closed'],
   'tab-updated': ['tab.updated'],
   'active-tab-changed': ['tab.activated'],
@@ -886,10 +888,12 @@ function normalizePolicyStateSnapshot(snapshot) {
 
 const EVENT_CAPABILITY_RULES = Object.freeze({
   'tab-created': 'tabs.read',
+  'tab-attached': 'tabs.read',
   'tab-closed': 'tabs.read',
   'tab-updated': 'tabs.read',
   'active-tab-changed': 'tabs.read',
   'tab.created': 'tabs.read',
+  'tab.attached': 'tabs.read',
   'tab.closed': 'tabs.read',
   'tab.updated': 'tabs.read',
   'tab.activated': 'tabs.read',
@@ -2731,7 +2735,7 @@ class BrowserBoxWebview extends HTMLElement {
       return;
     }
 
-    if (payload.type === 'tab-updated') {
+    if (payload.type === 'tab-updated' || payload.type === 'tab-attached') {
       this._updateLegacyTabCache(payload.data);
     } else if (payload.type === 'tab-created') {
       this._addLegacyTabCache(payload.data);

@@ -1159,6 +1159,13 @@ class BrowserBoxWebview extends HTMLElement {
     this._pageAugmentRefreshScheduled = false;
     this._resizeObserver = null;
     this._lastError = null;
+    this._frameBootstrapTimer = null;
+    this._frameBootstrapInFlight = null;
+    this._frameBootstrapRetryTimer = null;
+    this._frameBootstrapRetryRemaining = 0;
+    this._iframeViewportKickTimer = null;
+    this._visibilityPollTimer = null;
+    this._lastEffectiveVisibility = null;
 
     this._boundMessage = this._handleMessage.bind(this);
     this._boundLoad = this._handleLoad.bind(this);
@@ -1180,6 +1187,7 @@ class BrowserBoxWebview extends HTMLElement {
       this._resizeObserver = new ResizeObserver(() => this._handleResize());
       this._resizeObserver.observe(this);
     }
+    this._startVisibilityPolling();
     this.updateIframe();
   }
 
@@ -1189,6 +1197,13 @@ class BrowserBoxWebview extends HTMLElement {
     this.iframe.removeEventListener('load', this._boundLoad);
     this._resizeObserver?.disconnect?.();
     this._resizeObserver = null;
+    this._stopFrameBootstrap();
+    this._stopFrameBootstrapRetries();
+    if (this._iframeViewportKickTimer) {
+      clearTimeout(this._iframeViewportKickTimer);
+      this._iframeViewportKickTimer = null;
+    }
+    this._stopVisibilityPolling();
     this._stopInitPing();
     this._stopMidSync();
     this._rejectPending(createBrowserBoxError('browserbox-webview disconnected.', {
@@ -1214,6 +1229,8 @@ class BrowserBoxWebview extends HTMLElement {
       this._reconnectStopped = false;
       this._silentRecoveryUsed = false;
       this._resetReadyPromise();
+      this._stopFrameBootstrap();
+      this._stopFrameBootstrapRetries();
       this._rejectPending(createBrowserBoxError('browserbox-webview source changed.', {
         code: ERROR_CODES.TRANSPORT,
         retriable: true,
@@ -1259,6 +1276,8 @@ class BrowserBoxWebview extends HTMLElement {
         this._resolveReady(true);
       }
     }
+    this._scheduleFrameBootstrap('ready', 120);
+    this._startFrameBootstrapRetries('ready');
   }
 
   _rejectPending(error) {
@@ -1292,6 +1311,197 @@ class BrowserBoxWebview extends HTMLElement {
       height: this.clientHeight,
     });
     this._schedulePageAugmentRefresh();
+    this._scheduleFrameBootstrap('viewport-resized', 220);
+  }
+
+  _stopFrameBootstrap() {
+    if (this._frameBootstrapTimer) {
+      clearTimeout(this._frameBootstrapTimer);
+      this._frameBootstrapTimer = null;
+    }
+  }
+
+  _stopFrameBootstrapRetries() {
+    if (this._frameBootstrapRetryTimer) {
+      clearTimeout(this._frameBootstrapRetryTimer);
+      this._frameBootstrapRetryTimer = null;
+    }
+    this._frameBootstrapRetryRemaining = 0;
+  }
+
+  _kickIframeViewportGeometry() {
+    if (!this.iframe?.isConnected) {
+      return false;
+    }
+    const width = Math.max(0, Math.floor(this.clientWidth));
+    const height = Math.max(0, Math.floor(this.clientHeight));
+    if (width <= 0 || height <= 0) {
+      return false;
+    }
+    if (this._iframeViewportKickTimer) {
+      clearTimeout(this._iframeViewportKickTimer);
+      this._iframeViewportKickTimer = null;
+    }
+    const previousWidth = this.iframe.style.width;
+    const previousHeight = this.iframe.style.height;
+    this.iframe.style.width = `${width + 1}px`;
+    this.iframe.style.height = `${height + 1}px`;
+    this._iframeViewportKickTimer = setTimeout(() => {
+      this._iframeViewportKickTimer = null;
+      this.iframe.style.width = previousWidth;
+      this.iframe.style.height = previousHeight;
+    }, 40);
+    return true;
+  }
+
+  _isEffectivelyVisible() {
+    if (!this.isConnected) {
+      return false;
+    }
+    if (this.clientWidth <= 0 || this.clientHeight <= 0) {
+      return false;
+    }
+    let node = this;
+    while (node && node instanceof Element) {
+      const style = window.getComputedStyle(node);
+      if (
+        style.display === 'none'
+        || style.visibility === 'hidden'
+        || Number(style.opacity) === 0
+      ) {
+        return false;
+      }
+      node = node.parentElement;
+    }
+    return true;
+  }
+
+  _checkEffectiveVisibility() {
+    const nextVisible = this._isEffectivelyVisible();
+    const previousVisible = this._lastEffectiveVisibility;
+    this._lastEffectiveVisibility = nextVisible;
+    if (previousVisible === false && nextVisible === true) {
+      this._scheduleFrameBootstrap('became-visible', 50);
+      this._startFrameBootstrapRetries('became-visible', {
+        attempts: 6,
+        initialDelayMs: 180,
+        intervalMs: 650,
+      });
+    }
+  }
+
+  _startVisibilityPolling() {
+    this._stopVisibilityPolling();
+    this._lastEffectiveVisibility = this._isEffectivelyVisible();
+    this._visibilityPollTimer = setInterval(() => {
+      this._checkEffectiveVisibility();
+    }, 250);
+  }
+
+  _stopVisibilityPolling() {
+    if (this._visibilityPollTimer) {
+      clearInterval(this._visibilityPollTimer);
+      this._visibilityPollTimer = null;
+    }
+    this._lastEffectiveVisibility = null;
+  }
+
+  _scheduleFrameBootstrap(reason = 'lifecycle', delayMs = 120) {
+    this._stopFrameBootstrap();
+    this._frameBootstrapTimer = setTimeout(() => {
+      this._frameBootstrapTimer = null;
+      void this._bootstrapActiveTabFrame(reason);
+    }, Math.max(0, delayMs));
+  }
+
+  _startFrameBootstrapRetries(reason = 'ready', {
+    attempts = 24,
+    initialDelayMs = 400,
+    intervalMs = 800,
+  } = {}) {
+    this._stopFrameBootstrapRetries();
+    this._frameBootstrapRetryRemaining = Math.max(0, attempts);
+    if (this._frameBootstrapRetryRemaining === 0) {
+      return;
+    }
+    const run = () => {
+      if (!this.isConnected || this._frameBootstrapRetryRemaining <= 0) {
+        this._stopFrameBootstrapRetries();
+        return;
+      }
+      const attempt = (attempts - this._frameBootstrapRetryRemaining) + 1;
+      this._frameBootstrapRetryRemaining -= 1;
+      void this._bootstrapActiveTabFrame(`${reason}-retry-${attempt}`);
+      if (this._frameBootstrapRetryRemaining <= 0) {
+        this._frameBootstrapRetryTimer = null;
+        return;
+      }
+      this._frameBootstrapRetryTimer = setTimeout(run, Math.max(250, intervalMs));
+    };
+    this._frameBootstrapRetryTimer = setTimeout(run, Math.max(0, initialDelayMs));
+  }
+
+  async _bootstrapActiveTabFrame(reason = 'lifecycle') {
+    if (this._frameBootstrapInFlight) {
+      return this._frameBootstrapInFlight;
+    }
+    this._frameBootstrapInFlight = (async () => {
+      try {
+        if (!this.isConnected) {
+          return false;
+        }
+        if (this.clientWidth <= 0 || this.clientHeight <= 0) {
+          return false;
+        }
+        const ready = await this._ensureReadyForApi();
+        if (!ready) {
+          return false;
+        }
+        if (this._transportMode === 'unknown') {
+          await this._resolveTransport();
+        }
+        const activeTab = await this._getActiveTabInfo(null).catch(() => null);
+        const tabId = activeTab?.id || activeTab?.targetId || null;
+        if (!tabId) {
+          return false;
+        }
+        const kickedViewportGeometry = this._kickIframeViewportGeometry();
+        if (kickedViewportGeometry) {
+          await new Promise((resolve) => setTimeout(resolve, 80));
+        }
+        const forcedViewportReset = this._sendViewportReset(`frame-bootstrap:${reason}`);
+        if (forcedViewportReset) {
+          await new Promise((resolve) => setTimeout(resolve, 80));
+        }
+        if (this._transportMode === 'legacy') {
+          await this._legacyCall('switchToTabById', [tabId]);
+        } else {
+          await this._request('bbx-api-call', {
+            method: 'switchToTabById',
+            args: [tabId],
+          }, {
+            timeoutMs: Math.min(this.requestTimeoutMs, 5000),
+          });
+        }
+        console.info('[browserbox-webview] bootstrapped active tab frame', {
+          reason,
+          tabId,
+          transport: this._transportMode,
+          kickedViewportGeometry,
+          forcedViewportReset,
+        });
+        return true;
+      } catch (error) {
+        console.warn('[browserbox-webview] active tab frame bootstrap failed', {
+          reason,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return false;
+      } finally {
+        this._frameBootstrapInFlight = null;
+      }
+    })();
+    return this._frameBootstrapInFlight;
   }
 
   async _withRetry(task, {
@@ -1929,6 +2139,17 @@ class BrowserBoxWebview extends HTMLElement {
         allowUserToggleUI: config.allowUserToggleUI,
         chromeMode: config.chromeMode,
         embedderOrigin: this.embedderOrigin,
+        reason,
+      },
+    });
+    return true;
+  }
+
+  _sendViewportReset(reason = '') {
+    if (!this.iframe.contentWindow) return false;
+    this._postRaw({
+      type: 'bbx-viewport-reset',
+      data: {
         reason,
       },
     });

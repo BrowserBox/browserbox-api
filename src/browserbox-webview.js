@@ -1170,10 +1170,14 @@ class BrowserBoxWebview extends HTMLElement {
     this._iframeViewportKickTimer = null;
     this._visibilityPollTimer = null;
     this._lastEffectiveVisibility = null;
+    this._deferredVisibilityRecheckTimer = null;
 
     this._boundMessage = this._handleMessage.bind(this);
     this._boundLoad = this._handleLoad.bind(this);
     this._boundResize = this._handleResize.bind(this);
+    this._boundVisibilityChange = () => this._handleResumeTrigger('document-visibility');
+    this._boundPageShow = () => this._handleResumeTrigger('page-show');
+    this._boundWindowFocus = () => this._handleResumeTrigger('window-focus');
     this._resetReadyPromise();
     this.tabs = createTabsNamespace(this);
     this.page = createPageNamespace(this);
@@ -1186,6 +1190,9 @@ class BrowserBoxWebview extends HTMLElement {
   connectedCallback() {
     window.addEventListener('message', this._boundMessage);
     window.addEventListener('resize', this._boundResize);
+    window.addEventListener('pageshow', this._boundPageShow);
+    window.addEventListener('focus', this._boundWindowFocus);
+    document.addEventListener('visibilitychange', this._boundVisibilityChange);
     this.iframe.addEventListener('load', this._boundLoad);
     if (!this._resizeObserver && typeof ResizeObserver === 'function') {
       this._resizeObserver = new ResizeObserver(() => this._handleResize());
@@ -1198,6 +1205,9 @@ class BrowserBoxWebview extends HTMLElement {
   disconnectedCallback() {
     window.removeEventListener('message', this._boundMessage);
     window.removeEventListener('resize', this._boundResize);
+    window.removeEventListener('pageshow', this._boundPageShow);
+    window.removeEventListener('focus', this._boundWindowFocus);
+    document.removeEventListener('visibilitychange', this._boundVisibilityChange);
     this.iframe.removeEventListener('load', this._boundLoad);
     this._resizeObserver?.disconnect?.();
     this._resizeObserver = null;
@@ -1206,6 +1216,10 @@ class BrowserBoxWebview extends HTMLElement {
     if (this._iframeViewportKickTimer) {
       clearTimeout(this._iframeViewportKickTimer);
       this._iframeViewportKickTimer = null;
+    }
+    if (this._deferredVisibilityRecheckTimer) {
+      clearTimeout(this._deferredVisibilityRecheckTimer);
+      this._deferredVisibilityRecheckTimer = null;
     }
     this._stopVisibilityPolling();
     this._stopInitPing();
@@ -1362,6 +1376,9 @@ class BrowserBoxWebview extends HTMLElement {
     if (!this.isConnected) {
       return false;
     }
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+      return false;
+    }
     if (this.clientWidth <= 0 || this.clientHeight <= 0) {
       return false;
     }
@@ -1380,17 +1397,44 @@ class BrowserBoxWebview extends HTMLElement {
     return true;
   }
 
+  _scheduleVisibilityWake(reason = 'became-visible') {
+    console.info('[browserbox-webview] visibility wake scheduled', { reason });
+    this._scheduleFrameBootstrap(reason, 50);
+    this._startFrameBootstrapRetries(reason, {
+      attempts: 6,
+      initialDelayMs: 180,
+      intervalMs: 650,
+    });
+  }
+
   _checkEffectiveVisibility() {
     const nextVisible = this._isEffectivelyVisible();
     const previousVisible = this._lastEffectiveVisibility;
     this._lastEffectiveVisibility = nextVisible;
     if (previousVisible === false && nextVisible === true) {
-      this._scheduleFrameBootstrap('became-visible', 50);
-      this._startFrameBootstrapRetries('became-visible', {
-        attempts: 6,
-        initialDelayMs: 180,
-        intervalMs: 650,
-      });
+      this._scheduleVisibilityWake('became-visible');
+    }
+  }
+
+  _handleResumeTrigger(reason = 'document-visibility') {
+    const wasVisible = this._lastEffectiveVisibility;
+    this._checkEffectiveVisibility();
+    if (wasVisible === true && this._lastEffectiveVisibility === true) {
+      this._scheduleVisibilityWake(reason);
+    }
+    // If we transitioned hidden→visible, _checkEffectiveVisibility already
+    // scheduled the wake.  But if the poll timer hasn't run yet (fast
+    // minimize/restore), wasVisible might still be true from before the hide
+    // while _lastEffectiveVisibility just flipped to true inside the check.
+    // The guard above covers that (both true → wake). For the remaining edge
+    // case where an external caller (host window manager) fires this while
+    // the component was hidden and is now visible, always force a deferred
+    // recheck so layout can settle.
+    if (!this._deferredVisibilityRecheckTimer) {
+      this._deferredVisibilityRecheckTimer = setTimeout(() => {
+        this._deferredVisibilityRecheckTimer = null;
+        this._checkEffectiveVisibility();
+      }, 120);
     }
   }
 
@@ -3368,6 +3412,58 @@ class BrowserBoxWebview extends HTMLElement {
       status: 503,
       reason,
     }));
+  }
+
+  /**
+   * Public API: host window managers call this when the webview's container
+   * becomes visible again (e.g. desktop window restored from minimize).
+   * Bypasses poll-timer latency and forces immediate frame reactivation.
+   */
+  requestFrameRefresh(reason = 'host-request') {
+    this._lastEffectiveVisibility = false;
+    this._scheduleVisibilityWake(reason);
+  }
+
+  /**
+   * Direct "re-click the active tab" — calls switchToTabById without
+   * visibility or dimension checks.  Use this from host UI actions
+   * (taskbar restore, window un-minimize) where we KNOW the element is
+   * about to be visible but layout may not have settled yet.
+   * Falls back to the full bootstrap chain if the quick path fails.
+   */
+  async reactivateActiveTab(reason = 'host-reactivate') {
+    try {
+      const ready = await this._ensureReadyForApi();
+      if (!ready) {
+        this.requestFrameRefresh(reason);
+        return false;
+      }
+      const activeTab = await this._getActiveTabInfo(null).catch(() => null);
+      const tabId = activeTab?.id || activeTab?.targetId || null;
+      if (!tabId) {
+        this.requestFrameRefresh(reason);
+        return false;
+      }
+      if (this._transportMode === 'legacy') {
+        await this._legacyCall('switchToTabById', [tabId]);
+      } else {
+        await this._request('bbx-api-call', {
+          method: 'switchToTabById',
+          args: [tabId],
+        }, {
+          timeoutMs: Math.min(this.requestTimeoutMs, 5000),
+        });
+      }
+      console.info('[browserbox-webview] reactivateActiveTab succeeded', { reason, tabId });
+      return true;
+    } catch (error) {
+      console.warn('[browserbox-webview] reactivateActiveTab failed, falling back', {
+        reason,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      this.requestFrameRefresh(reason);
+      return false;
+    }
   }
 
   updateIframe() {

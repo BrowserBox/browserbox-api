@@ -1,5 +1,10 @@
 # Webview API
 
+
+installed via npm:
+
+`npm i --save @browserbox/webview-element`
+
 Ensure you set
 
 ```bash

@@ -1170,6 +1170,7 @@ class BrowserBoxWebview extends HTMLElement {
     this._frameBootstrapEpoch = 0;
     this._lastSuccessfulBootstrapAt = 0;
     this._iframeViewportKickTimer = null;
+    this._resizeBootstrapTimer = null;
     this._lastResizeWidth = -1;
     this._lastResizeHeight = -1;
     this._visibilityPollTimer = null;
@@ -1219,6 +1220,10 @@ class BrowserBoxWebview extends HTMLElement {
     if (this._iframeViewportKickTimer) {
       clearTimeout(this._iframeViewportKickTimer);
       this._iframeViewportKickTimer = null;
+    }
+    if (this._resizeBootstrapTimer) {
+      clearTimeout(this._resizeBootstrapTimer);
+      this._resizeBootstrapTimer = null;
     }
     if (this._deferredVisibilityRecheckTimer) {
       clearTimeout(this._deferredVisibilityRecheckTimer);
@@ -1330,7 +1335,13 @@ class BrowserBoxWebview extends HTMLElement {
   _handleResize() {
     const w = this.clientWidth;
     const h = this.clientHeight;
-    if (w === this._lastResizeWidth && h === this._lastResizeHeight) return;
+    const RESIZE_TOLERANCE_PX = 2;
+    if (
+      this._lastResizeWidth >= 0
+      && this._lastResizeHeight >= 0
+      && Math.abs(w - this._lastResizeWidth) <= RESIZE_TOLERANCE_PX
+      && Math.abs(h - this._lastResizeHeight) <= RESIZE_TOLERANCE_PX
+    ) return;
     this._lastResizeWidth = w;
     this._lastResizeHeight = h;
     this._emitBrowserBoxEvent('viewport.resized', {
@@ -1339,6 +1350,12 @@ class BrowserBoxWebview extends HTMLElement {
     });
     this._schedulePageAugmentRefresh();
     this._sendViewportReset('viewport-resized');
+    if (this._resizeBootstrapTimer) clearTimeout(this._resizeBootstrapTimer);
+    this._resizeBootstrapTimer = setTimeout(() => {
+      this._resizeBootstrapTimer = null;
+      this._invalidateFrameBootstrap('resize-settled');
+      this._scheduleFrameBootstrap('resize-settled', 0);
+    }, 450);
   }
 
   _stopFrameBootstrap() {

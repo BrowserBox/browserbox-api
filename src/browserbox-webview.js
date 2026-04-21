@@ -1133,7 +1133,7 @@ class BrowserBoxWebview extends HTMLElement {
     // Iframe connection retry state
     this._iframeRetryCount = 0;
     this._iframeRetryMax = 5;
-    this._iframeRetryPingThreshold = 10; // pings before retry
+    this._iframeRetryPingThreshold = 30; // pings (1s each) before retry — covers ~90s cold starts
     this._initPingCount = 0;
     this._reconnectStopped = false;
     this._silentRecoveryUsed = false;
@@ -1145,7 +1145,7 @@ class BrowserBoxWebview extends HTMLElement {
     this._midSyncAcked = false;
     this._midSyncTimer = null;
     this._midSyncAttempt = 0;
-    this._midSyncMaxAttempts = 20;
+    this._midSyncMaxAttempts = 90;
     this._midSyncIntervalMs = 1000;
 
     // UI config sync state (embedder → BrowserBox iframe)
@@ -1167,7 +1167,11 @@ class BrowserBoxWebview extends HTMLElement {
     this._frameBootstrapInFlight = null;
     this._frameBootstrapRetryTimer = null;
     this._frameBootstrapRetryRemaining = 0;
+    this._frameBootstrapEpoch = 0;
+    this._lastSuccessfulBootstrapAt = 0;
     this._iframeViewportKickTimer = null;
+    this._lastResizeWidth = -1;
+    this._lastResizeHeight = -1;
     this._visibilityPollTimer = null;
     this._lastEffectiveVisibility = null;
     this._deferredVisibilityRecheckTimer = null;
@@ -1211,8 +1215,7 @@ class BrowserBoxWebview extends HTMLElement {
     this.iframe.removeEventListener('load', this._boundLoad);
     this._resizeObserver?.disconnect?.();
     this._resizeObserver = null;
-    this._stopFrameBootstrap();
-    this._stopFrameBootstrapRetries();
+    this._invalidateFrameBootstrap('disconnected');
     if (this._iframeViewportKickTimer) {
       clearTimeout(this._iframeViewportKickTimer);
       this._iframeViewportKickTimer = null;
@@ -1246,9 +1249,9 @@ class BrowserBoxWebview extends HTMLElement {
       this._initPingCount = 0;
       this._reconnectStopped = false;
       this._silentRecoveryUsed = false;
+      this._lastSuccessfulBootstrapAt = 0;
       this._resetReadyPromise();
-      this._stopFrameBootstrap();
-      this._stopFrameBootstrapRetries();
+      this._invalidateFrameBootstrap('login-link-changed');
       this._rejectPending(createBrowserBoxError('browserbox-webview source changed.', {
         code: ERROR_CODES.TRANSPORT,
         retriable: true,
@@ -1294,6 +1297,7 @@ class BrowserBoxWebview extends HTMLElement {
         this._resolveReady(true);
       }
     }
+    this._invalidateFrameBootstrap('ready');
     this._scheduleFrameBootstrap('ready', 120);
     this._startFrameBootstrapRetries('ready');
   }
@@ -1324,12 +1328,17 @@ class BrowserBoxWebview extends HTMLElement {
   }
 
   _handleResize() {
+    const w = this.clientWidth;
+    const h = this.clientHeight;
+    if (w === this._lastResizeWidth && h === this._lastResizeHeight) return;
+    this._lastResizeWidth = w;
+    this._lastResizeHeight = h;
     this._emitBrowserBoxEvent('viewport.resized', {
-      width: this.clientWidth,
-      height: this.clientHeight,
+      width: w,
+      height: h,
     });
     this._schedulePageAugmentRefresh();
-    this._scheduleFrameBootstrap('viewport-resized', 220);
+    this._sendViewportReset('viewport-resized');
   }
 
   _stopFrameBootstrap() {
@@ -1347,6 +1356,13 @@ class BrowserBoxWebview extends HTMLElement {
     this._frameBootstrapRetryRemaining = 0;
   }
 
+  _invalidateFrameBootstrap(_reason = 'state-changed') { // eslint-disable-line no-unused-vars
+    this._frameBootstrapEpoch += 1;
+    this._stopFrameBootstrap();
+    this._stopFrameBootstrapRetries();
+    return this._frameBootstrapEpoch;
+  }
+
   _kickIframeViewportGeometry() {
     if (!this.iframe?.isConnected) {
       return false;
@@ -1354,6 +1370,13 @@ class BrowserBoxWebview extends HTMLElement {
     const width = Math.max(0, Math.floor(this.clientWidth));
     const height = Math.max(0, Math.floor(this.clientHeight));
     if (width <= 0 || height <= 0) {
+      return false;
+    }
+    // Skip the +1px kick when using percentage sizing (embedded mode) —
+    // the kick triggers parent relayout → ResizeObserver → infinite loop.
+    const widthAttr = this.getAttribute('width') || '100%';
+    const heightAttr = this.getAttribute('height') || '100%';
+    if (!/^\d+$/.test(widthAttr) || !/^\d+$/.test(heightAttr)) {
       return false;
     }
     if (this._iframeViewportKickTimer) {
@@ -1398,7 +1421,18 @@ class BrowserBoxWebview extends HTMLElement {
   }
 
   _scheduleVisibilityWake(reason = 'became-visible') {
-    console.info('[browserbox-webview] visibility wake scheduled', { reason });
+    // If a bootstrap succeeded very recently, skip: routine focus/visibility
+    // events from the host page don't need to restart the cast pipeline.
+    // `reactivateActiveTab` / `requestFrameRefresh` deliberately reset
+    // `_lastEffectiveVisibility` so their explicit wakes bypass this cooldown.
+    const VISIBILITY_WAKE_COOLDOWN_MS = 2500;
+    const since = Date.now() - this._lastSuccessfulBootstrapAt;
+    if (this._lastSuccessfulBootstrapAt && since < VISIBILITY_WAKE_COOLDOWN_MS) {
+      console.info(`[browserbox-webview] visibility wake skipped (${reason}, last success ${since}ms ago)`);
+      return;
+    }
+    console.info(`[browserbox-webview] visibility wake scheduled (${reason})`);
+    this._invalidateFrameBootstrap(`visibility-wake:${reason}`);
     this._scheduleFrameBootstrap(reason, 50);
     this._startFrameBootstrapRetries(reason, {
       attempts: 6,
@@ -1472,16 +1506,20 @@ class BrowserBoxWebview extends HTMLElement {
     if (this._frameBootstrapRetryRemaining === 0) {
       return;
     }
-    const run = () => {
+    const run = async () => {
       if (!this.isConnected || this._frameBootstrapRetryRemaining <= 0) {
         this._stopFrameBootstrapRetries();
         return;
       }
       const attempt = (attempts - this._frameBootstrapRetryRemaining) + 1;
       this._frameBootstrapRetryRemaining -= 1;
-      void this._bootstrapActiveTabFrame(`${reason}-retry-${attempt}`);
-      if (this._frameBootstrapRetryRemaining <= 0) {
-        this._frameBootstrapRetryTimer = null;
+      const ok = await this._bootstrapActiveTabFrame(`${reason}-retry-${attempt}`);
+      // A successful bootstrap means the active tab is bound and the viewport
+      // was re-asserted — additional retries would just churn the cast. Only
+      // keep retrying if the bootstrap short-circuited (dimensions, readiness,
+      // or tab lookup failed).
+      if (ok || this._frameBootstrapRetryRemaining <= 0) {
+        this._stopFrameBootstrapRetries();
         return;
       }
       this._frameBootstrapRetryTimer = setTimeout(run, Math.max(250, intervalMs));
@@ -1494,6 +1532,7 @@ class BrowserBoxWebview extends HTMLElement {
       return this._frameBootstrapInFlight;
     }
     this._frameBootstrapInFlight = (async () => {
+      const bootstrapEpoch = this._frameBootstrapEpoch;
       try {
         if (!this.isConnected) {
           return false;
@@ -1513,13 +1552,32 @@ class BrowserBoxWebview extends HTMLElement {
         if (!tabId) {
           return false;
         }
+        if (bootstrapEpoch !== this._frameBootstrapEpoch) {
+          return false;
+        }
         const kickedViewportGeometry = this._kickIframeViewportGeometry();
         if (kickedViewportGeometry) {
           await new Promise((resolve) => setTimeout(resolve, 80));
         }
+        if (bootstrapEpoch !== this._frameBootstrapEpoch) {
+          return false;
+        }
+        const currentTab = await this._getActiveTabInfo(null).catch(() => null);
+        const currentTabId = currentTab?.id || currentTab?.targetId || null;
+        if (!currentTabId || currentTabId !== tabId) {
+          return false;
+        }
         const forcedViewportReset = this._sendViewportReset(`frame-bootstrap:${reason}`);
         if (forcedViewportReset) {
           await new Promise((resolve) => setTimeout(resolve, 80));
+        }
+        if (bootstrapEpoch !== this._frameBootstrapEpoch) {
+          return false;
+        }
+        const activeAfterReset = await this._getActiveTabInfo(null).catch(() => null);
+        const activeAfterResetId = activeAfterReset?.id || activeAfterReset?.targetId || null;
+        if (!activeAfterResetId || activeAfterResetId !== tabId) {
+          return false;
         }
         if (this._transportMode === 'legacy') {
           await this._legacyCall('switchToTabById', [tabId]);
@@ -1531,8 +1589,8 @@ class BrowserBoxWebview extends HTMLElement {
             timeoutMs: Math.min(this.requestTimeoutMs, 5000),
           });
         }
-        console.info('[browserbox-webview] bootstrapped active tab frame', {
-          reason,
+        this._lastSuccessfulBootstrapAt = Date.now();
+        console.info(`[browserbox-webview] bootstrapped frame (${reason})`, {
           tabId,
           transport: this._transportMode,
           kickedViewportGeometry,
@@ -1540,8 +1598,7 @@ class BrowserBoxWebview extends HTMLElement {
         });
         return true;
       } catch (error) {
-        console.warn('[browserbox-webview] active tab frame bootstrap failed', {
-          reason,
+        console.warn(`[browserbox-webview] active tab frame bootstrap failed (${reason})`, {
           error: error instanceof Error ? error.message : String(error),
         });
         return false;
@@ -1673,6 +1730,7 @@ class BrowserBoxWebview extends HTMLElement {
     this._transportMode = 'unknown';
     this._legacyTabsCache = [];
     this._initPingCount = 0;
+    this._lastSuccessfulBootstrapAt = 0;
     if (needsReset) {
       this._iframeRetryCount = 0;
       this._resetReadyPromise();
@@ -1888,14 +1946,22 @@ class BrowserBoxWebview extends HTMLElement {
     if (!mid || !this.iframe.contentWindow) {
       return false;
     }
-    this._postRaw({
-      type: 'bbx-mid-sync',
-      data: {
-        mid,
-        reason,
-        attempt: this._midSyncAttempt,
-      },
-    });
+    // Mid-sync messages use '*' targetOrigin because the iframe may
+    // still be navigating to the BBX origin (from parent origin).
+    // These messages contain only the routing mid, not sensitive data.
+    try {
+      this.iframe.contentWindow.postMessage({
+        type: 'bbx-mid-sync',
+        data: {
+          mid,
+          reason,
+          attempt: this._midSyncAttempt,
+        },
+      }, '*');
+    } catch (error) {
+      console.warn('[bbx-mid] postMessage failed', { error: error.message });
+      return false;
+    }
     console.info('[bbx-mid] sent sync', {
       mid,
       reason,
@@ -2779,6 +2845,10 @@ class BrowserBoxWebview extends HTMLElement {
       return;
     }
 
+    if (payload.type === 'active-tab-changed') {
+      this._invalidateFrameBootstrap('active-tab-changed');
+    }
+
     if (payload.type === 'tab-updated' || payload.type === 'tab-attached') {
       this._updateLegacyTabCache(payload.data);
     } else if (payload.type === 'tab-created') {
@@ -3421,6 +3491,10 @@ class BrowserBoxWebview extends HTMLElement {
    */
   requestFrameRefresh(reason = 'host-request') {
     this._lastEffectiveVisibility = false;
+    // Host-driven refreshes (window un-minimize, taskbar restore) must bypass
+    // the visibility-wake cooldown — those are the exact cases where cast
+    // really did stall and a rebind is required.
+    this._lastSuccessfulBootstrapAt = 0;
     this._scheduleVisibilityWake(reason);
   }
 

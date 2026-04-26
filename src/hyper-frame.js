@@ -740,7 +740,7 @@ const EVENT_ALIAS_MAP = {
   'modal-closed': ['modal.closed'],
 };
 
-function debugHyperFrame(...args) {
+function debugBrowserBoxWebview(...args) {
   if (globalThis.BROWSERBOX_WEBVIEW_DEBUG === true) {
     console.log(...args);
   }
@@ -1891,7 +1891,7 @@ class HyperFrame extends HTMLElement {
 
   _assignIframeSrc(nextSrc, reason) {
     const stack = new Error().stack || '(no stack available)';
-    debugHyperFrame('[DEBUG][SRC_ASSIGN]', {
+    debugBrowserBoxWebview('[DEBUG][SRC_ASSIGN]', {
       reason,
       currentSrc: this.iframe.src,
       nextSrc,

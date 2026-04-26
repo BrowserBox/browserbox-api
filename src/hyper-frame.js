@@ -1,23 +1,23 @@
 /**
  * SPDX-License-Identifier: AGPL-3.0-or-later
- * BrowserBox SaaS desktop webview API surface.
+ * Hyper-Frame — an iframe that can frame any website.
  */
 
 /**
- * @file BrowserBox Web Component — Canonical Embedding API
+ * @file Hyper-Frame Web Component — Canonical Embedding API
  * @description Custom element for embedding BrowserBox remote browser sessions.
- * This file is the single source of truth for the checked-in BrowserBox webview
+ * This file is the single source of truth for the <hyper-frame> custom element
  * API. Synced package/demo copies are refreshed with `npm run sync:webview-api`.
- * Consumers create a `<browserbox-webview>` element, set a `login-link`, and
+ * Consumers create a `<hyper-frame>` element, set a `login-link`, and
  * call methods on it.
  *
  * ## Usage
  * ```html
- * <browserbox-webview
+ * <hyper-frame
  *   login-link="https://bbx.example.com/login?token=..."
  *   width="100%"
  *   height="100%">
- * </browserbox-webview>
+ * </hyper-frame>
  * ```
  *
  * ## Attributes
@@ -28,9 +28,11 @@
  * | `height` | no | `"100%"` | CSS height (px if bare number) |
  * | `embedder-origin` | no | `"*"` | Origin of the embedding page (passed to BrowserBox iframe) |
  * | `request-timeout-ms` | no | `30000` | API call timeout (ms) |
+ * | `media-permissions` | no | `"default"` | Set to `"none"` to deny embedded mic/camera/display-capture use |
+ * | `session-unload-warning` | no | `"default"` | Set to `"none"` to suppress BrowserBox's own "leave remote browser?" beforeunload warning |
+ * | `beforeunload-behavior` | no | `"default"` | Set to `"leave"` to auto-depart or `"remain"` to auto-remain when a remote page triggers a beforeunload dialog |
  *
- * ## Events
- * | Event | Detail | Description |
+ * ## Events * | Event | Detail | Description |
  * |-------|--------|-------------|
  * | `ready` | `{ type }` | Legacy transport handshake completed |
  * | `api-ready` | `{ methods: string[] }` | Modern API available |
@@ -44,6 +46,9 @@
  * | `did-stop-loading` | `{ tabId, url }` | Page load finished |
  * | `did-navigate` | `{ tabId, url }` | Navigation committed |
  * | `policy-denied` | `{ url, reason }` | Navigation blocked by policy |
+ * | `modal-opened` | `{ id, type, actions, dismissAction, ... }` | BrowserBox modal became visible |
+ * | `modal-updated` | `{ id, type, actions, dismissAction, ... }` | BrowserBox modal metadata changed |
+ * | `modal-closed` | `{ id, type, action, reason }` | BrowserBox modal closed or was answered |
  * | `sos` | `{ reasonCode, message, retryUrl, ... }` | Fatal unusable signal from embedded BrowserBox |
  * | `usability-changed` | `{ usable: boolean }` | Browser usability state changed |
  * | `disconnected` | — | Session ended (element removed or login-link changed) |
@@ -55,7 +60,7 @@
  * Detection is one-shot — once resolved, transport is locked for the session.
  *
  * @example
- * const bbx = document.querySelector('browserbox-webview');
+ * const bbx = document.querySelector('hyper-frame');
  * await bbx.whenReady();
  * await bbx.createTab('https://example.com');
  * const tabs = await bbx.getTabs();
@@ -83,9 +88,9 @@ const ERROR_CODES = Object.freeze({
   INTERNAL: 'ERR_INTERNAL',
 });
 
-const POLICY_PROFILE_ID = 'browserbox-webview-local-v1';
-const POLICY_ID = 'browserbox-webview-local';
-const POLICY_BASELINE_ID = 'browserbox-webview-local';
+const POLICY_PROFILE_ID = 'hyper-frame-local-v1';
+const POLICY_ID = 'hyper-frame-local';
+const POLICY_BASELINE_ID = 'hyper-frame-local';
 const POLICY_SCHEMA_VERSION = 1;
 
 function createBrowserBoxError(message, {
@@ -114,7 +119,7 @@ function throwInvalidArgument(message, details = {}) {
 
 function assertPlainObject(value, label) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throwInvalidArgument(`browserbox-webview ${label} requires an object.`, {
+    throwInvalidArgument(`hyper-frame ${label} requires an object.`, {
       label,
     });
   }
@@ -124,7 +129,7 @@ function assertPlainObject(value, label) {
 function assertNonEmptyString(value, label) {
   const normalized = typeof value === 'string' ? value.trim() : '';
   if (!normalized) {
-    throwInvalidArgument(`browserbox-webview ${label} requires a non-empty string.`, {
+    throwInvalidArgument(`hyper-frame ${label} requires a non-empty string.`, {
       label,
     });
   }
@@ -229,7 +234,7 @@ async function normalizeCaptureResult(result, format = 'png') {
       return normalizeCaptureResult(result.data, format);
     }
   }
-  throw createBrowserBoxError('browserbox-webview capture returned an unsupported result.', {
+  throw createBrowserBoxError('hyper-frame capture returned an unsupported result.', {
     code: ERROR_CODES.INTERNAL,
     status: 500,
   });
@@ -493,7 +498,7 @@ function normalizeAugmentContent(content) {
       if (content.type === 'json' && content.data !== undefined) {
         return { type: 'json', data: cloneJsonValue(content.data) };
       }
-      throwInvalidArgument('browserbox-webview augment content type is invalid.', {
+      throwInvalidArgument('hyper-frame augment content type is invalid.', {
         contentType: content.type,
       });
     }
@@ -505,7 +510,7 @@ function normalizeAugmentContent(content) {
   if (Array.isArray(content)) {
     return { type: 'json', data: cloneJsonValue(content) };
   }
-  throwInvalidArgument('browserbox-webview augment content must be text/html/json compatible.', {
+  throwInvalidArgument('hyper-frame augment content must be text/html/json compatible.', {
     contentType: typeof content,
   });
 }
@@ -614,6 +619,7 @@ const POLICY_DEFAULTS = {
   select: { use: false, extract: false },
   events: { read: true },
   policy: { read: true },
+  modals: { read: true, respond: true },
 };
 
 const INTERACTION_MODE_PRESETS = {
@@ -665,6 +671,8 @@ const IMPLEMENTED_CAPABILITIES = {
   'select.extract': true,
   'events.read': true,
   'policy.read': true,
+  'modals.read': true,
+  'modals.respond': true,
 };
 
 const METHOD_CAPABILITY_MAP = {
@@ -703,6 +711,10 @@ const METHOD_CAPABILITY_MAP = {
   evaluate: ['act.evaluate'],
   uiVisible: ['page.read'],
   allowUserToggleUI: ['page.read'],
+  getTransportDiagnostics: ['events.read'],
+  getCurrentModal: ['modals.read'],
+  respondToModal: ['modals.respond'],
+  dismissModal: ['modals.respond'],
   frameCapture: ['capture.frame'],
   getFrame: ['capture.frame'],
   cleanSlate: ['tabs.write', 'page.navigate'],
@@ -723,9 +735,12 @@ const EVENT_ALIAS_MAP = {
   'did-stop-loading': ['page.load.stopped'],
   'favicon-changed': ['page.favicon.changed'],
   'policy-denied': ['policy.denied'],
+  'modal-opened': ['modal.opened'],
+  'modal-updated': ['modal.updated'],
+  'modal-closed': ['modal.closed'],
 };
 
-function debugBrowserBoxWebview(...args) {
+function debugHyperFrame(...args) {
   if (globalThis.BROWSERBOX_WEBVIEW_DEBUG === true) {
     console.log(...args);
   }
@@ -906,6 +921,12 @@ const EVENT_CAPABILITY_RULES = Object.freeze({
   'page.load.stopped': 'page.read',
   'page.favicon.changed': 'page.read',
   'policy.changed': 'policy.read',
+  'modal-opened': 'modals.read',
+  'modal-updated': 'modals.read',
+  'modal-closed': 'modals.read',
+  'modal.opened': 'modals.read',
+  'modal.updated': 'modals.read',
+  'modal.closed': 'modals.read',
 });
 
 function createPolicyNamespace(instance) {
@@ -957,7 +978,7 @@ class BrowserBoxError extends Error {
 
 class BrowserBoxPolicyError extends BrowserBoxError {
   constructor(capability) {
-    super(`browserbox-webview policy denied capability '${capability}'.`, {
+    super(`hyper-frame policy denied capability '${capability}'.`, {
       code: ERROR_CODES.POLICY_DENIED,
       status: 403,
       capability,
@@ -966,7 +987,45 @@ class BrowserBoxPolicyError extends BrowserBoxError {
   }
 }
 
-class BrowserBoxWebview extends HTMLElement {
+const DEFAULT_IFRAME_ALLOW_FEATURES = [
+  'accelerometer',
+  'camera',
+  'encrypted-media',
+  'display-capture',
+  'geolocation',
+  'gyroscope',
+  'microphone',
+  'midi',
+  'clipboard-read',
+  'clipboard-write',
+  'web-share',
+  'fullscreen',
+];
+const MEDIA_ALLOW_FEATURES = new Set(['camera', 'microphone', 'display-capture']);
+
+function normalizeMediaPermissions(value) {
+  return String(value || '').trim().toLowerCase() === 'none' ? 'none' : 'default';
+}
+
+function normalizeSessionUnloadWarning(value) {
+  return String(value || '').trim().toLowerCase() === 'none' ? 'none' : 'default';
+}
+
+function normalizeBeforeUnloadBehavior(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (raw === 'allow' || raw === 'leave') return 'allow';
+  if (raw === 'block' || raw === 'remain') return 'block';
+  return 'default';
+}
+
+function computeIframeAllow(mediaPermissions) {
+  const features = normalizeMediaPermissions(mediaPermissions) === 'none'
+    ? DEFAULT_IFRAME_ALLOW_FEATURES.filter((f) => !MEDIA_ALLOW_FEATURES.has(f))
+    : DEFAULT_IFRAME_ALLOW_FEATURES;
+  return features.join('; ');
+}
+
+class HyperFrame extends HTMLElement {
   static get observedAttributes() {
     return [
       'login-link',
@@ -982,6 +1041,9 @@ class BrowserBoxWebview extends HTMLElement {
       'chrome',
       'augment-root',
       'capture',
+      'media-permissions',
+      'session-unload-warning',
+      'beforeunload-behavior',
     ];
   }
 
@@ -995,7 +1057,7 @@ class BrowserBoxWebview extends HTMLElement {
     this.iframe.allowFullscreen = true;
     this.iframe.setAttribute(
       'allow',
-      'accelerometer; camera; encrypted-media; display-capture; geolocation; gyroscope; microphone; midi; clipboard-read; clipboard-write; web-share; fullscreen'
+      computeIframeAllow(this.getAttribute('media-permissions'))
     );
     this.iframe.setAttribute(
       'sandbox',
@@ -1232,7 +1294,7 @@ class BrowserBoxWebview extends HTMLElement {
     this._stopVisibilityPolling();
     this._stopInitPing();
     this._stopMidSync();
-    this._rejectPending(createBrowserBoxError('browserbox-webview disconnected.', {
+    this._rejectPending(createBrowserBoxError('hyper-frame disconnected.', {
       code: ERROR_CODES.TRANSPORT,
       retriable: true,
       status: 503,
@@ -1257,7 +1319,7 @@ class BrowserBoxWebview extends HTMLElement {
       this._lastSuccessfulBootstrapAt = 0;
       this._resetReadyPromise();
       this._invalidateFrameBootstrap('login-link-changed');
-      this._rejectPending(createBrowserBoxError('browserbox-webview source changed.', {
+      this._rejectPending(createBrowserBoxError('hyper-frame source changed.', {
         code: ERROR_CODES.TRANSPORT,
         retriable: true,
         status: 503,
@@ -1275,6 +1337,21 @@ class BrowserBoxWebview extends HTMLElement {
     }
     if (name === 'ui-visible' || name === 'allow-user-toggle-ui') {
       this._sendUISync('attribute-changed');
+      return;
+    }
+    if (name === 'media-permissions') {
+      if (this.iframe) {
+        this.iframe.setAttribute('allow', computeIframeAllow(newValue));
+      }
+      this._sendUISync('media-permissions-attribute-changed');
+      return;
+    }
+    if (name === 'session-unload-warning') {
+      this._sendUISync('session-unload-warning-attribute-changed');
+      return;
+    }
+    if (name === 'beforeunload-behavior') {
+      this._sendUISync('beforeunload-behavior-attribute-changed');
       return;
     }
     if (name === 'policy' || name === 'interaction-mode' || name === 'chrome' || name === 'augment-root' || name === 'capture') {
@@ -1445,10 +1522,10 @@ class BrowserBoxWebview extends HTMLElement {
     const VISIBILITY_WAKE_COOLDOWN_MS = 2500;
     const since = Date.now() - this._lastSuccessfulBootstrapAt;
     if (this._lastSuccessfulBootstrapAt && since < VISIBILITY_WAKE_COOLDOWN_MS) {
-      console.info(`[browserbox-webview] visibility wake skipped (${reason}, last success ${since}ms ago)`);
+      console.info(`[hyper-frame] visibility wake skipped (${reason}, last success ${since}ms ago)`);
       return;
     }
-    console.info(`[browserbox-webview] visibility wake scheduled (${reason})`);
+    console.info(`[hyper-frame] visibility wake scheduled (${reason})`);
     this._invalidateFrameBootstrap(`visibility-wake:${reason}`);
     this._scheduleFrameBootstrap(reason, 50);
     this._startFrameBootstrapRetries(reason, {
@@ -1607,7 +1684,7 @@ class BrowserBoxWebview extends HTMLElement {
           });
         }
         this._lastSuccessfulBootstrapAt = Date.now();
-        console.info(`[browserbox-webview] bootstrapped frame (${reason})`, {
+        console.info(`[hyper-frame] bootstrapped frame (${reason})`, {
           tabId,
           transport: this._transportMode,
           kickedViewportGeometry,
@@ -1615,7 +1692,7 @@ class BrowserBoxWebview extends HTMLElement {
         });
         return true;
       } catch (error) {
-        console.warn(`[browserbox-webview] active tab frame bootstrap failed (${reason})`, {
+        console.warn(`[hyper-frame] active tab frame bootstrap failed (${reason})`, {
           error: error instanceof Error ? error.message : String(error),
         });
         return false;
@@ -1647,7 +1724,7 @@ class BrowserBoxWebview extends HTMLElement {
         await new Promise((resolve) => setTimeout(resolve, delayMs));
       }
     }
-    throw lastError || createBrowserBoxError('browserbox-webview retry failed.', {
+    throw lastError || createBrowserBoxError('hyper-frame retry failed.', {
       code: ERROR_CODES.INTERNAL,
       status: 500,
     });
@@ -1798,7 +1875,7 @@ class BrowserBoxWebview extends HTMLElement {
     if (!src) return;
     const delay = Math.min(2000 * this._iframeRetryCount, 8000);
     console.log(
-      `[browserbox-webview] iframe not responsive after ${this._iframeRetryPingThreshold}s, `
+      `[hyper-frame] iframe not responsive after ${this._iframeRetryPingThreshold}s, `
       + `retry ${this._iframeRetryCount}/${this._iframeRetryMax} in ${delay}ms`
     );
     this._emitBrowserBoxEvent('iframe-retry', {
@@ -1814,7 +1891,7 @@ class BrowserBoxWebview extends HTMLElement {
 
   _assignIframeSrc(nextSrc, reason) {
     const stack = new Error().stack || '(no stack available)';
-    debugBrowserBoxWebview('[DEBUG][SRC_ASSIGN]', {
+    debugHyperFrame('[DEBUG][SRC_ASSIGN]', {
       reason,
       currentSrc: this.iframe.src,
       nextSrc,
@@ -1866,14 +1943,14 @@ class BrowserBoxWebview extends HTMLElement {
     this._midSyncAcked = false;
     this._reconnectStopped = false;
     this._resetReadyPromise();
-    this._rejectPending(createBrowserBoxError(`browserbox-webview silent recovery (${reason}).`, {
+    this._rejectPending(createBrowserBoxError(`hyper-frame silent recovery (${reason}).`, {
       code: ERROR_CODES.TRANSPORT,
       retriable: true,
       status: 503,
       reason,
     }));
 
-    console.info('[browserbox-webview] attempting one-shot silent recovery reload', {
+    console.info('[hyper-frame] attempting one-shot silent recovery reload', {
       reason,
       nextSrc,
     });
@@ -2037,10 +2114,16 @@ class BrowserBoxWebview extends HTMLElement {
     };
     const chromeMode = String(this.getAttribute('chrome') || 'default').trim().toLowerCase();
     const chromeVisibleByMode = chromeMode === 'none' ? false : true;
+    const mediaPermissions = normalizeMediaPermissions(this.getAttribute('media-permissions'));
+    const sessionUnloadWarning = normalizeSessionUnloadWarning(this.getAttribute('session-unload-warning'));
+    const beforeUnloadBehavior = normalizeBeforeUnloadBehavior(this.getAttribute('beforeunload-behavior'));
     return {
       uiVisible: parseBool(this.getAttribute('ui-visible'), chromeVisibleByMode),
       allowUserToggleUI: parseBool(this.getAttribute('allow-user-toggle-ui'), true),
       chromeMode,
+      mediaPermissions,
+      sessionUnloadWarning,
+      beforeUnloadBehavior,
     };
   }
 
@@ -2056,12 +2139,12 @@ class BrowserBoxWebview extends HTMLElement {
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
           capabilityOverride = extractApiCapabilities(parsed);
         } else {
-          console.error('[browserbox-webview] policy attribute must decode to an object.', {
+          console.error('[hyper-frame] policy attribute must decode to an object.', {
             policy: policyRaw,
           });
         }
       } catch (error) {
-        console.error('[browserbox-webview] failed to parse policy attribute.', {
+        console.error('[hyper-frame] failed to parse policy attribute.', {
           policy: policyRaw,
           error,
         });
@@ -2090,7 +2173,7 @@ class BrowserBoxWebview extends HTMLElement {
       localOverride,
     );
     return createLocalPolicySnapshot(capabilities, {
-      baselineId: `browserbox-webview-${interactionMode}`,
+      baselineId: `hyper-frame-${interactionMode}`,
       featureControls: {
         chromeMode: String(this.getAttribute('chrome') || 'default').trim().toLowerCase(),
         augmentRoot: String(this.getAttribute('augment-root') || 'open').trim().toLowerCase(),
@@ -2244,7 +2327,7 @@ class BrowserBoxWebview extends HTMLElement {
     scheduleMicrotask(() => {
       this._pageAugmentRefreshScheduled = false;
       this._refreshPageAugments().catch((error) => {
-        console.warn('[browserbox-webview] failed to refresh page augments', error);
+        console.warn('[hyper-frame] failed to refresh page augments', error);
       });
     });
   }
@@ -2269,6 +2352,9 @@ class BrowserBoxWebview extends HTMLElement {
         uiVisible: config.uiVisible,
         allowUserToggleUI: config.allowUserToggleUI,
         chromeMode: config.chromeMode,
+        mediaPermissions: config.mediaPermissions,
+        sessionUnloadWarning: config.sessionUnloadWarning,
+        beforeunloadBehavior: config.beforeUnloadBehavior,
         embedderOrigin: this.embedderOrigin,
         reason,
       },
@@ -2407,15 +2493,15 @@ class BrowserBoxWebview extends HTMLElement {
 
   async _callApiDirect(method, args = [], requestOptions = {}) {
     if (typeof method !== 'string' || method.trim().length === 0) {
-      throwInvalidArgument('browserbox-webview API method requires a non-empty string.');
+      throwInvalidArgument('hyper-frame API method requires a non-empty string.');
     }
     if (!Array.isArray(args)) {
-      throwInvalidArgument('browserbox-webview API args must be an array.');
+      throwInvalidArgument('hyper-frame API args must be an array.');
     }
     const normalizedMethod = method.trim();
     const ready = await this._ensureReadyForApi();
     if (!ready) {
-      throw createBrowserBoxError(`browserbox-webview API method '${normalizedMethod}' called before handshake completed.`, {
+      throw createBrowserBoxError(`hyper-frame API method '${normalizedMethod}' called before handshake completed.`, {
         code: ERROR_CODES.NOT_READY,
         retriable: true,
         status: 409,
@@ -2610,7 +2696,7 @@ class BrowserBoxWebview extends HTMLElement {
     this._assertCapability('augment.write');
     this._assertCapability(`augment.${normalized.space}`);
     if (this._augmentRegistry.has(normalized.id)) {
-      throw createBrowserBoxError(`browserbox-webview augment '${normalized.id}' already exists.`, {
+      throw createBrowserBoxError(`hyper-frame augment '${normalized.id}' already exists.`, {
         code: ERROR_CODES.CONFLICT,
         status: 409,
         augmentId: normalized.id,
@@ -2641,7 +2727,7 @@ class BrowserBoxWebview extends HTMLElement {
     this._assertCapability('augment.write');
     const record = this._augmentRegistry.get(augmentId);
     if (!record) {
-      throw createBrowserBoxError(`browserbox-webview augment '${augmentId}' does not exist.`, {
+      throw createBrowserBoxError(`hyper-frame augment '${augmentId}' does not exist.`, {
         code: ERROR_CODES.NOT_FOUND,
         status: 404,
         augmentId,
@@ -2807,7 +2893,7 @@ class BrowserBoxWebview extends HTMLElement {
         routingMid: this._routingMid || '',
         loginLink: this.loginLink || '',
         forwardedAt: Date.now(),
-        forwardedBy: 'browserbox-webview',
+        forwardedBy: 'hyper-frame',
       };
       this._setUsable(false, `sos:${reasonCode}`);
       this._emitBrowserBoxEvent('sos', detail);
@@ -2879,7 +2965,7 @@ class BrowserBoxWebview extends HTMLElement {
 
   _request(type, data = {}, options = {}) {
     if (!this.iframe.contentWindow) {
-      const error = createBrowserBoxError('browserbox-webview iframe is not ready.', {
+      const error = createBrowserBoxError('hyper-frame iframe is not ready.', {
         code: ERROR_CODES.TRANSPORT,
         retriable: true,
         status: 503,
@@ -2900,7 +2986,7 @@ class BrowserBoxWebview extends HTMLElement {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this._pending.delete(requestId);
-        const error = createBrowserBoxError(`browserbox-webview request timed out (${type}) after ${timeoutMs}ms.`, {
+        const error = createBrowserBoxError(`hyper-frame request timed out (${type}) after ${timeoutMs}ms.`, {
           code: ERROR_CODES.TIMEOUT,
           retriable: true,
           status: 504,
@@ -2918,7 +3004,7 @@ class BrowserBoxWebview extends HTMLElement {
       } catch (error) {
         clearTimeout(timer);
         this._pending.delete(requestId);
-        const transportError = createBrowserBoxError(`browserbox-webview failed to postMessage '${type}'.`, {
+        const transportError = createBrowserBoxError(`hyper-frame failed to postMessage '${type}'.`, {
           code: ERROR_CODES.TRANSPORT,
           retriable: true,
           status: 503,
@@ -2946,7 +3032,7 @@ class BrowserBoxWebview extends HTMLElement {
     try {
       window.parent.postMessage(message, '*');
     } catch (error) {
-      console.warn('[browserbox-webview] failed to forward message to parent', error);
+      console.warn('[hyper-frame] failed to forward message to parent', error);
     }
   }
 
@@ -2956,7 +3042,7 @@ class BrowserBoxWebview extends HTMLElement {
     }
 
     const timeout = new Promise((_, reject) => {
-      setTimeout(() => reject(createBrowserBoxError(`browserbox-webview ready timeout after ${timeoutMs}ms.`, {
+      setTimeout(() => reject(createBrowserBoxError(`hyper-frame ready timeout after ${timeoutMs}ms.`, {
         code: ERROR_CODES.TIMEOUT,
         retriable: true,
         status: 504,
@@ -2971,10 +3057,10 @@ class BrowserBoxWebview extends HTMLElement {
   on(eventName, handler, options) {
     this._assertCapability('events.read');
     if (typeof eventName !== 'string' || eventName.trim().length === 0) {
-      throwInvalidArgument('browserbox-webview on(eventName, handler) requires a non-empty eventName.');
+      throwInvalidArgument('hyper-frame on(eventName, handler) requires a non-empty eventName.');
     }
     if (typeof handler !== 'function') {
-      throwInvalidArgument('browserbox-webview on(eventName, handler) requires handler to be a function.');
+      throwInvalidArgument('hyper-frame on(eventName, handler) requires handler to be a function.');
     }
     this.addEventListener(eventName, handler, options);
     return () => {
@@ -2984,10 +3070,10 @@ class BrowserBoxWebview extends HTMLElement {
 
   off(eventName, handler, options) {
     if (typeof eventName !== 'string' || eventName.trim().length === 0) {
-      throwInvalidArgument('browserbox-webview off(eventName, handler) requires a non-empty eventName.');
+      throwInvalidArgument('hyper-frame off(eventName, handler) requires a non-empty eventName.');
     }
     if (typeof handler !== 'function') {
-      throwInvalidArgument('browserbox-webview off(eventName, handler) requires handler to be a function.');
+      throwInvalidArgument('hyper-frame off(eventName, handler) requires handler to be a function.');
     }
     this.removeEventListener(eventName, handler, options);
   }
@@ -3133,12 +3219,12 @@ class BrowserBoxWebview extends HTMLElement {
   }
 
   async listApiMethods(options = {}) {
-    if (this._apiMethods.length > 0) {
+    if (this._apiMethods.length > 0 && options.refresh !== true) {
       return this._apiMethods.slice();
     }
     const ready = await this._ensureReadyForApi();
     if (!ready) {
-      throw createBrowserBoxError('browserbox-webview API handshake is not ready.', {
+      throw createBrowserBoxError('hyper-frame API handshake is not ready.', {
         code: ERROR_CODES.NOT_READY,
         retriable: true,
         status: 409,
@@ -3153,7 +3239,7 @@ class BrowserBoxWebview extends HTMLElement {
         ...options,
         timeoutMs: Number.isFinite(options.timeoutMs)
           ? options.timeoutMs
-          : Math.min(this.requestTimeoutMs, 5000),
+          : Math.min(this.requestTimeoutMs, 30000),
       });
       this._apiMethods = Array.isArray(methods) ? methods.slice() : [];
       this._transportMode = 'modern';
@@ -3178,7 +3264,7 @@ class BrowserBoxWebview extends HTMLElement {
     const invoke = async () => {
       const ready = await this._ensureReadyForApi();
       if (!ready) {
-        throw createBrowserBoxError(`browserbox-webview API method '${method}' called before handshake completed.`, {
+        throw createBrowserBoxError(`hyper-frame API method '${method}' called before handshake completed.`, {
           code: ERROR_CODES.NOT_READY,
           retriable: true,
           status: 409,
@@ -3224,11 +3310,11 @@ class BrowserBoxWebview extends HTMLElement {
 
   async act(actionRequest) {
     if (!actionRequest || typeof actionRequest !== 'object' || Array.isArray(actionRequest)) {
-      throwInvalidArgument('browserbox-webview act(action) requires an object action request.');
+      throwInvalidArgument('hyper-frame act(action) requires an object action request.');
     }
     const actionNames = Object.keys(actionRequest).filter((key) => actionRequest[key] !== undefined);
     if (actionNames.length !== 1) {
-      throwInvalidArgument('browserbox-webview act(action) requires exactly one action key.');
+      throwInvalidArgument('hyper-frame act(action) requires exactly one action key.');
     }
 
     const actionName = actionNames[0];
@@ -3241,7 +3327,7 @@ class BrowserBoxWebview extends HTMLElement {
         return normalizeActionResult(actionName, value);
       case 'click': {
         if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-          throwInvalidArgument('browserbox-webview act({ click }) requires an object payload.');
+          throwInvalidArgument('hyper-frame act({ click }) requires an object payload.');
         }
         const { selector, ...clickOptions } = payload;
         value = await this.click(assertNonEmptyString(selector, 'act({ click: { selector } })'), clickOptions);
@@ -3249,7 +3335,7 @@ class BrowserBoxWebview extends HTMLElement {
       }
       case 'type': {
         if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-          throwInvalidArgument('browserbox-webview act({ type }) requires an object payload.');
+          throwInvalidArgument('hyper-frame act({ type }) requires an object payload.');
         }
         const {
           selector,
@@ -3257,7 +3343,7 @@ class BrowserBoxWebview extends HTMLElement {
           ...typeOptions
         } = payload;
         if (typeof text !== 'string') {
-          throwInvalidArgument('browserbox-webview act({ type }) requires payload.text to be a string.');
+          throwInvalidArgument('hyper-frame act({ type }) requires payload.text to be a string.');
         }
         value = await this.type(assertNonEmptyString(selector, 'act({ type: { selector } })'), text, typeOptions);
         return normalizeActionResult(actionName, value);
@@ -3270,7 +3356,7 @@ class BrowserBoxWebview extends HTMLElement {
         return normalizeActionResult(actionName, value);
       case 'waitForSelector': {
         if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-          throwInvalidArgument('browserbox-webview act({ waitForSelector }) requires an object payload.');
+          throwInvalidArgument('hyper-frame act({ waitForSelector }) requires an object payload.');
         }
         const { selector, ...waitOptions } = payload;
         value = await this.waitForSelector(
@@ -3280,7 +3366,7 @@ class BrowserBoxWebview extends HTMLElement {
         return normalizeActionResult(actionName, value);
       }
       default:
-        throw createBrowserBoxError(`browserbox-webview act(action) does not support '${actionName}'.`, {
+        throw createBrowserBoxError(`hyper-frame act(action) does not support '${actionName}'.`, {
           code: ERROR_CODES.UNSUPPORTED,
           status: 501,
           action: actionName,
@@ -3366,7 +3452,7 @@ class BrowserBoxWebview extends HTMLElement {
     });
     if (!this.iframe.contentWindow) {
       this._setUsable(false, 'iframe-not-ready');
-      const error = createBrowserBoxError('browserbox-webview health check failed: iframe is not ready.', {
+      const error = createBrowserBoxError('hyper-frame health check failed: iframe is not ready.', {
         code: ERROR_CODES.TRANSPORT,
         retriable: true,
         status: 503,
@@ -3404,7 +3490,7 @@ class BrowserBoxWebview extends HTMLElement {
             this._transportMode = 'legacy';
             return true;
           } catch (legacyError) {
-            const message = `browserbox-webview health check failed after ${effectiveTimeoutMs}ms `
+            const message = `hyper-frame health check failed after ${effectiveTimeoutMs}ms `
               + `(modern error: ${modernError instanceof Error ? modernError.message : String(modernError)}; `
               + `legacy error: ${legacyError instanceof Error ? legacyError.message : String(legacyError)})`;
             throw createBrowserBoxError(message, {
@@ -3445,6 +3531,19 @@ class BrowserBoxWebview extends HTMLElement {
     }
     return this.callApi('allowUserToggleUI', allow);
   }
+  getCurrentModal() {
+    return this.callApi('getCurrentModal');
+  }
+  respondToModal(request = {}) {
+    assertPlainObject(request, 'respondToModal(request)');
+    return this.callApi('respondToModal', request);
+  }
+  dismissModal(request = {}) {
+    if (request !== undefined) {
+      assertPlainObject(request, 'dismissModal(request)');
+    }
+    return this.callApi('dismissModal', request || {});
+  }
 
   // Automation surface
   waitForSelector(selector, opts = {}) { return this.callApi('waitForSelector', selector, opts); }
@@ -3462,7 +3561,7 @@ class BrowserBoxWebview extends HTMLElement {
       this._reconnectStopped = false;
       this._midSyncAcked = false;
       this._resetReadyPromise();
-      this._rejectPending(createBrowserBoxError('browserbox-webview refreshed.', {
+      this._rejectPending(createBrowserBoxError('hyper-frame refreshed.', {
         code: ERROR_CODES.TRANSPORT,
         retriable: true,
         status: 503,
@@ -3493,7 +3592,7 @@ class BrowserBoxWebview extends HTMLElement {
     this._stopInitPing();
     this._stopMidSync();
     this._setUsable(false, reason);
-    this._rejectPending(createBrowserBoxError(`browserbox-webview reconnect stopped (${reason}).`, {
+    this._rejectPending(createBrowserBoxError(`hyper-frame reconnect stopped (${reason}).`, {
       code: ERROR_CODES.TRANSPORT,
       retriable: true,
       status: 503,
@@ -3545,10 +3644,10 @@ class BrowserBoxWebview extends HTMLElement {
           timeoutMs: Math.min(this.requestTimeoutMs, 5000),
         });
       }
-      console.info('[browserbox-webview] reactivateActiveTab succeeded', { reason, tabId });
+      console.info('[hyper-frame] reactivateActiveTab succeeded', { reason, tabId });
       return true;
     } catch (error) {
-      console.warn('[browserbox-webview] reactivateActiveTab failed, falling back', {
+      console.warn('[hyper-frame] reactivateActiveTab failed, falling back', {
         reason,
         error: error instanceof Error ? error.message : String(error),
       });
@@ -3882,6 +3981,6 @@ class BrowserBoxWebview extends HTMLElement {
 
 }
 
-if (!customElements.get('browserbox-webview')) {
-  customElements.define('browserbox-webview', BrowserBoxWebview);
+if (!customElements.get('hyper-frame')) {
+  customElements.define('hyper-frame', HyperFrame);
 }

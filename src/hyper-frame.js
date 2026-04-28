@@ -31,6 +31,7 @@
  * | `media-permissions` | no | `"default"` | Set to `"none"` to deny embedded mic/camera/display-capture use |
  * | `session-unload-warning` | no | `"default"` | Set to `"none"` to suppress BrowserBox's own "leave remote browser?" beforeunload warning |
  * | `beforeunload-behavior` | no | `"default"` | Set to `"leave"` to auto-depart or `"remain"` to auto-remain when a remote page triggers a beforeunload dialog |
+ * | `first-load-cleanse` | no | — | If present, automatically close all tabs on the first load of a session. If a URL is provided as the value, that URL is opened after cleansing. |
  *
  * ## Events * | Event | Detail | Description |
  * |-------|--------|-------------|
@@ -740,7 +741,7 @@ const EVENT_ALIAS_MAP = {
   'modal-closed': ['modal.closed'],
 };
 
-function debugBrowserBoxWebview(...args) {
+function debugHyperFrame(...args) {
   if (globalThis.BROWSERBOX_WEBVIEW_DEBUG === true) {
     console.log(...args);
   }
@@ -1044,6 +1045,7 @@ class HyperFrame extends HTMLElement {
       'media-permissions',
       'session-unload-warning',
       'beforeunload-behavior',
+      'first-load-cleanse',
     ];
   }
 
@@ -1450,7 +1452,7 @@ class HyperFrame extends HTMLElement {
     this._frameBootstrapRetryRemaining = 0;
   }
 
-  _invalidateFrameBootstrap(_reason = 'state-changed') { // eslint-disable-line no-unused-vars
+  _invalidateFrameBootstrap(_reason = 'state-changed') {
     this._frameBootstrapEpoch += 1;
     this._stopFrameBootstrap();
     this._stopFrameBootstrapRetries();
@@ -1891,7 +1893,7 @@ class HyperFrame extends HTMLElement {
 
   _assignIframeSrc(nextSrc, reason) {
     const stack = new Error().stack || '(no stack available)';
-    debugBrowserBoxWebview('[DEBUG][SRC_ASSIGN]', {
+    debugHyperFrame('[DEBUG][SRC_ASSIGN]', {
       reason,
       currentSrc: this.iframe.src,
       nextSrc,
@@ -2439,6 +2441,32 @@ class HyperFrame extends HTMLElement {
     this._legacyTabsCache = this._legacyTabsCache.map((tab, i) => ({ ...tab, index: i }));
   }
 
+  _resetTabsToCleanSlate(force = false, urlOverride = null) {
+    const attrValue = this.getAttribute('first-load-cleanse');
+    if (!force && attrValue === null) return;
+    const loginLink = this.getAttribute('login-link');
+    if (!loginLink) return;
+    const storageKey = `bbx-session-init:${loginLink}`;
+    try {
+      if (localStorage.getItem(storageKey)) return;
+      localStorage.setItem(storageKey, '1');
+    } catch {
+      return;
+    }
+
+    const candidateUrl = urlOverride ?? attrValue;
+    const url = typeof candidateUrl === 'string' && candidateUrl.length > 0 ? candidateUrl : null;
+
+    const snapshot = this._legacyTabsCache.slice();
+    for (let i = snapshot.length - 1; i >= 0; i--) {
+      const tabId = snapshot[i]?.id || snapshot[i]?.targetId;
+      if (tabId) this._postRaw({ type: 'closeTab', tabId, data: {} });
+    }
+    if (url) {
+      this._postRaw({ type: 'createTab', data: { url } });
+    }
+  }
+
   _removeLegacyTabCache(detail) {
     const tabId = this._normalizeTabId(detail);
     if (!tabId) return;
@@ -2923,8 +2951,10 @@ class HyperFrame extends HTMLElement {
     }
 
     if (payload.type === 'tab-api-ready') {
+      const wasReady = this._isReady;
       this._setReady();
       this._emitBrowserBoxEvent('ready', { type: payload.type });
+      if (!wasReady) this._resetTabsToCleanSlate();
       return;
     }
 
@@ -2937,8 +2967,10 @@ class HyperFrame extends HTMLElement {
         this._serverPolicySnapshot = normalizePolicyStateSnapshot(payload.data.policy);
         this._refreshPolicyState('server-policy-ready');
       }
+      const wasReady = this._isReady;
       this._setReady();
       this._emitBrowserBoxEvent('api-ready', payload.data || {});
+      if (!wasReady) this._resetTabsToCleanSlate();
       return;
     }
 
@@ -3427,6 +3459,7 @@ class HyperFrame extends HTMLElement {
   frameCapture(enabled = true) { return this.callApi('frameCapture', Boolean(enabled)); }
   getFrame() { return this.callApi('getFrame'); }
   cleanSlate(url) { return this.callApi('cleanSlate', url); }
+  firstLoadCleanse(url = null) { return this._resetTabsToCleanSlate(true, url); }
   async health({ timeoutMs } = {}) {
     const startedAt = (typeof performance !== 'undefined' && typeof performance.now === 'function')
       ? performance.now()

@@ -75,6 +75,7 @@ await bbx.cleanSlate('https://example.com');
 | `media-permissions` | no | `"default"` | Set to `"none"` to deny mic/camera/display-capture |
 | `session-unload-warning` | no | `"default"` | Set to `"none"` to suppress beforeunload warning |
 | `beforeunload-behavior` | no | `"default"` | `"leave"` to auto-depart, `"remain"` to auto-stay |
+| `first-load-cleanse` | no | — | Close all tabs on first session load; if the value is a URL, open that URL after cleansing |
 
 ## Namespaced API
 

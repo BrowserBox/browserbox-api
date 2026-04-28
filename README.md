@@ -77,6 +77,8 @@ await bbx.cleanSlate('https://example.com');
 | `beforeunload-behavior` | no | `"default"` | `"leave"` to auto-depart, `"remain"` to auto-stay |
 | `first-load-cleanse` | no | — | Close all tabs on first session load; if the value is a URL, open that URL after cleansing |
 
+`first-load-cleanse` runs once for each `login-link`. Use a non-empty URL to close existing tabs and open that replacement tab. Use an empty value, such as `first-load-cleanse=""`, to close existing tabs without opening a replacement. The `firstLoadCleanse(url?)` method follows the same rule: a non-empty string opens that URL, and an empty string performs the delete-only cleanse.
+
 ## Namespaced API
 
 Access via the element (`bbx.tabs.list()`) or via `bbx.session` facade.

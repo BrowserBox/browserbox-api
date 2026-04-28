@@ -3,184 +3,304 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Hyper-Frame — An iframe that can frame any website</title>
+  <title>Hyper-Frame - an iframe that can frame any website</title>
+  <meta name="description" content="Hyper-Frame is a custom element that embeds a live remote browser, so pages with X-Frame-Options or CSP frame restrictions can still be viewed, controlled, and captured from your app.">
+  <meta property="og:title" content="Hyper-Frame - an iframe that can frame any website">
+  <meta property="og:description" content="Try the live console. Embed, navigate, automate, and capture pages through a remote browser-backed iframe.">
+  <meta property="og:image" content="https://hyper-frame.art/og-image.png">
+  <meta property="og:url" content="https://hyper-frame.art/">
+  <meta property="og:type" content="website">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Hyper-Frame - an iframe that can frame any website">
+  <meta name="twitter:description" content="Try the live console. Embed, navigate, automate, and capture pages through a remote browser-backed iframe.">
+  <meta name="twitter:image" content="https://hyper-frame.art/og-image.png">
+  <link rel="preload" href="/fonts/ibm-plex-serif-400.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/fonts/ibm-plex-serif-700.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/fonts/ibm-plex-mono-400.woff2" as="font" type="font/woff2" crossorigin>
   <style>
+    @font-face {
+      font-family: 'IBM Plex Serif';
+      font-style: normal;
+      font-weight: 400;
+      font-display: block;
+      src: url('/fonts/ibm-plex-serif-400.woff2') format('woff2');
+    }
+
+    @font-face {
+      font-family: 'IBM Plex Serif';
+      font-style: normal;
+      font-weight: 700;
+      font-display: block;
+      src: url('/fonts/ibm-plex-serif-700.woff2') format('woff2');
+    }
+
+    @font-face {
+      font-family: 'IBM Plex Mono';
+      font-style: normal;
+      font-weight: 400;
+      font-display: block;
+      src: url('/fonts/ibm-plex-mono-400.woff2') format('woff2');
+    }
+
     :root {
-      --bg: #0f172a;
-      --text: #f8fafc;
-      --text-dim: #94a3b8;
-      --primary: #3b82f6;
-      --primary-hover: #60a5fa;
-      --accent: #10b981;
-      --card-bg: #1e293b;
-      --border: #334155;
+      color-scheme: light;
+      --paper: #fbfaf4;
+      --ink: #111;
+      --muted: #57534e;
+      --rule: #111;
+      --soft-rule: #c8c1b6;
+      --code: #f0eee6;
+      --visited: #551a8b;
+      --link: #0000ee;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      background: var(--paper);
     }
 
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background-color: var(--bg);
-      color: var(--text);
-      line-height: 1.6;
-      margin: 0;
-      padding: 0;
-      display: flex;
-      flex-direction: column;
-      min-height: 100vh;
+      max-width: 860px;
+      margin: 0 auto;
+      padding: 28px 18px 48px;
+      color: var(--ink);
+      background: var(--paper);
+      font: 16px/1.55 "IBM Plex Serif", Georgia, "Times New Roman", serif;
     }
 
-    .container {
-      max-width: 900px;
-      margin: 0 auto;
-      padding: 4rem 2rem;
-      flex: 1;
+    header,
+    section,
+    footer {
+      border-top: 1px solid var(--rule);
+      padding-top: 18px;
+      margin-top: 24px;
     }
 
     header {
-      text-align: center;
-      margin-bottom: 4rem;
+      border-top: 4px double var(--rule);
+      margin-top: 0;
+    }
+
+    h1,
+    h2,
+    h3,
+    p,
+    ul,
+    pre {
+      margin: 0 0 14px;
     }
 
     h1 {
-      font-size: 3.5rem;
-      font-weight: 800;
-      margin: 0 0 1rem;
-      letter-spacing: -0.025em;
-      background: linear-gradient(to right, var(--primary), var(--accent));
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
+      font-size: clamp(2.2rem, 10vw, 5.4rem);
+      line-height: 0.95;
+      letter-spacing: 0;
+      font-weight: 400;
     }
 
-    .tagline {
-      font-size: 1.5rem;
-      color: var(--text-dim);
-      max-width: 600px;
-      margin: 0 auto;
-    }
-
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-      gap: 2rem;
-      margin-bottom: 4rem;
-    }
-
-    .card {
-      background: var(--card-bg);
-      border: 1px solid var(--border);
-      border-radius: 1rem;
-      padding: 2rem;
-      transition: transform 0.2s ease, border-color 0.2s ease;
-    }
-
-    .card:hover {
-      transform: translateY(-4px);
-      border-color: var(--primary);
-    }
-
-    .card h2 {
+    h2 {
+      font-size: 1.35rem;
+      line-height: 1.2;
       margin-top: 0;
-      font-size: 1.25rem;
-      color: var(--primary);
     }
 
-    .btn {
-      display: inline-block;
-      background: var(--primary);
-      color: white;
-      text-decoration: none;
-      padding: 0.75rem 1.5rem;
-      border-radius: 0.5rem;
-      font-weight: 600;
-      transition: background 0.2s ease;
-      margin-top: 1rem;
+    h3 {
+      font-size: 1rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
     }
 
-    .btn:hover {
-      background: var(--primary-hover);
+    a {
+      color: var(--link);
+      text-decoration: underline;
     }
 
-    .license-banner {
-      background: rgba(59, 130, 246, 0.1);
-      border-left: 4px solid var(--primary);
-      padding: 1.5rem;
-      border-radius: 0.5rem;
-      margin-bottom: 4rem;
+    a:visited {
+      color: var(--visited);
     }
 
-    .license-banner h3 {
-      margin-top: 0;
-      color: var(--primary);
-    }
-
-    footer {
-      text-align: center;
-      padding: 4rem 2rem;
-      border-top: 1px solid var(--border);
-      color: var(--text-dim);
-      font-size: 0.875rem;
-    }
-
-    footer a {
-      color: var(--primary);
-      text-decoration: none;
+    code,
+    pre,
+    .mono {
+      font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.93em;
     }
 
     code {
-      background: #000;
-      padding: 0.2rem 0.4rem;
-      border-radius: 0.25rem;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      font-size: 0.9em;
+      background: var(--code);
+      padding: 0 0.2em;
+    }
+
+    pre {
+      overflow-x: auto;
+      padding: 12px;
+      border: 1px solid var(--soft-rule);
+      background: var(--code);
+      white-space: pre;
+    }
+
+    ul {
+      padding-left: 1.35rem;
+    }
+
+    .lede {
+      font-size: clamp(1.2rem, 3vw, 1.65rem);
+      line-height: 1.35;
+      max-width: 760px;
+    }
+
+    .try-line {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 18px;
+      align-items: baseline;
+      margin: 22px 0 0;
+      padding: 12px 0;
+      border-top: 1px solid var(--soft-rule);
+      border-bottom: 1px solid var(--soft-rule);
+    }
+
+    .primary-link {
+      font: 700 1.05rem/1 "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    .note,
+    footer {
+      color: var(--muted);
+    }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 24px;
+    }
+
+    .facts {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 0 0 14px;
+    }
+
+    .facts th,
+    .facts td {
+      border-top: 1px solid var(--soft-rule);
+      padding: 8px 8px 8px 0;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .facts th {
+      width: 10rem;
+      font-weight: 700;
+    }
+
+    @media (max-width: 680px) {
+      body {
+        padding: 20px 14px 36px;
+      }
+
+      .two-col {
+        grid-template-columns: 1fr;
+        gap: 8px;
+      }
     }
   </style>
 </head>
 <body>
-  <div class="container">
-    <header>
-      <h1>Hyper-Frame</h1>
-      <p class="tagline">The <code>&lt;hyper-frame&gt;</code> custom element — an iframe that can frame any website.</p>
-    </header>
+  <header>
+    <p class="mono">Show HN candidate / live prototype</p>
+    <h1>Hyper-Frame</h1>
+    <p class="lede">An iframe that can frame any website.</p>
+    <p>
+      <code>&lt;hyper-frame&gt;</code> is a custom element backed by a live remote browser.
+      Your page gets an embeddable surface, navigation controls, automation calls,
+      screenshots, tab events, and streaming health metrics.
+    </p>
+    <p class="try-line">
+      <a class="primary-link" href="/console.html">Open the live console</a>
+      <span class="note">No account needed for the demo path. Try a URL that normal iframes refuse.</span>
+    </p>
+  </header>
 
-    <div class="license-banner">
-      <h3>Proprietary & Commercial</h3>
-      <p>Hyper-Frame is proprietary, closed-source software powered by the <strong>BrowserBox</strong> engine. It is designed for secure, isolated remote browsing and automation. Use of this software requires a valid commercial license from <strong>DOSAYGO</strong>.</p>
-      <a href="https://browserbox.io" class="btn">Get a License at BrowserBox.io</a>
-    </div>
-
-    <div class="grid">
-      <div class="card">
-        <h2>Developer Console</h2>
-        <p>Explore the full API surface, test automation commands, and view live metrics in our canonical developer console.</p>
-        <a href="/console.html" class="btn">Launch Console</a>
-      </div>
-
-      <div class="card">
-        <h2>Windows 98½ Demo</h2>
-        <p>Experience Hyper-Frame integrated into a nostalgic desktop environment. See how it handles complex embedding scenarios.</p>
-        <a href="https://win9-5.com" class="btn">Try the Demo</a>
-      </div>
-
-      <div class="card">
-        <h2>Documentation</h2>
-        <p>Learn how to install the <code>@browserbox/hyper-frame</code> package and integrate it into your own applications.</p>
-        <a href="https://github.com/BrowserBox/hyper-frame" class="btn">View on GitHub</a>
-      </div>
-    </div>
-
-    <section>
-      <h2>Overview</h2>
-      <p>Hyper-Frame bypasses traditional iframe restrictions like <code>X-Frame-Options: DENY</code> and <code>Content-Security-Policy</code> by leveraging a secure remote browser isolation (RBI) backend. It allows developers to embed any website, interact with it programmatically, and capture its state in real-time.</p>
+  <section>
+    <h2>What to try first</h2>
+    <div class="two-col">
       <ul>
-        <li><strong>Navigate:</strong> Control the remote browser's URL and history.</li>
-        <li><strong>Automate:</strong> Click, type, and evaluate JavaScript within the frame.</li>
-        <li><strong>Capture:</strong> Stream live frames or take high-quality screenshots.</li>
-        <li><strong>Secure:</strong> Keep high-risk browsing activity isolated from your users' local environments.</li>
+        <li>Open the console.</li>
+        <li>Click <strong>Connect</strong>.</li>
+        <li>Navigate to a site with frame restrictions.</li>
+        <li>Watch the FPS, transport, tabs, and events update.</li>
       </ul>
-    </section>
-  </div>
+      <ul>
+        <li>Use the Direct API tab to call <code>getTabs</code>, <code>evaluate</code>, or <code>getFrame</code>.</li>
+        <li>Copy the embed snippet and wire the same element into your own page.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section>
+    <h2>The whole API can start this small</h2>
+    <pre><code>&lt;script type="module" src="https://hyper-frame.art/hyper-frame.js"&gt;&lt;/script&gt;
+
+&lt;hyper-frame
+  login-link="https://browserbox.example/login?token=..."
+  width="100%"
+  height="640"&gt;
+&lt;/hyper-frame&gt;</code></pre>
+    <p>
+      After the element is ready, call methods on it:
+      <code>navigateTo(url)</code>, <code>createTab(url)</code>,
+      <code>evaluate(js)</code>, <code>getFrame()</code>,
+      <code>getTransportDiagnostics()</code>.
+    </p>
+  </section>
+
+  <section>
+    <h2>Why this exists</h2>
+    <table class="facts">
+      <tr>
+        <th>Problem</th>
+        <td>Real sites often cannot be placed in a normal iframe because of <code>X-Frame-Options</code> and <code>Content-Security-Policy</code>.</td>
+      </tr>
+      <tr>
+        <th>Approach</th>
+        <td>Run the page in an isolated BrowserBox session, stream the browser surface, and expose a narrow element API to the embedding page.</td>
+      </tr>
+      <tr>
+        <th>Use cases</th>
+        <td>Remote browser isolation, product embeds, browser automation, support consoles, web QA, and agent-facing browsers.</td>
+      </tr>
+      <tr>
+        <th>Status</th>
+        <td>Working demo and developer console. Commercial packaging is in progress.</td>
+      </tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>Links</h2>
+    <ul>
+      <li><a href="/console.html">Developer console</a></li>
+      <li><a href="https://win9-5.com/api/">API docs</a></li>
+      <li><a href="https://github.com/BrowserBox/hyper-frame">Hyper-Frame package</a></li>
+      <li><a href="https://browserbox.io">BrowserBox</a></li>
+      <li><a href="https://win9-5.com">Windows 98.5 demo</a></li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Commercial note</h2>
+    <p>
+      Hyper-Frame is proprietary software powered by the BrowserBox engine.
+      The public demo is here for trying the interface and API shape. Production
+      use requires a commercial BrowserBox license.
+    </p>
+  </section>
 
   <footer>
-    <p>&copy; 2026 DOSAYGO Corporation. Powered by <a href="https://browserbox.io">BrowserBox</a>.</p>
+    <p>Copyright 2026 DOSAYGO Corporation. Powered by <a href="https://browserbox.io">BrowserBox</a>.</p>
   </footer>
 </body>
 </html>
